@@ -1,6 +1,8 @@
 **/plots/
 **/data/
 
+flwr-reqs.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
