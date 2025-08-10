@@ -151,6 +151,9 @@ def test(net, testloader, device, img_col_name="image"):
 def get_weights(net):
     return [val.cpu().numpy() for _, val in net.state_dict().items()]
 
+def get_update(local_net, global_params):
+    local_weights = get_weights(local_net)
+    return [local - global_w for local, global_w in zip(local_weights, global_params)]
 
 def set_weights(net, parameters):
     params_dict = zip(net.state_dict().keys(), parameters)

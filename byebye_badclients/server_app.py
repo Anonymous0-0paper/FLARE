@@ -1,14 +1,17 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
 import os
+import time
 
 import torchvision
-from flwr.common import Context, ndarrays_to_parameters
-from flwr.server import ServerApp, ServerAppComponents, ServerConfig
+from flwr.common import Context, ndarrays_to_parameters, Parameters, FitIns
+from flwr.server import ServerApp, ServerAppComponents, ServerConfig, ClientManager
+from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy import FedAvg
 
 from byebye_badclients.result_processing import list_to_csv, list_to_line_plot, list_accumulation, \
     per_second_calculation
 from byebye_badclients.task import Net, NetMNIST, get_weights
+from byebye_badclients.client_reputation import ClientReputation
 
 def process_evaluate_results(results: dict[str, list[float]], dataset: str):
     dataset_name = dataset.split('/')[-1]
@@ -144,11 +147,56 @@ class WeightedFedAvg(FedAvg):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.clients = {}
+
     def aggregate_fit(self, server_round, results, failures):
-        cids = [client.cid for client, _ in results]
-        print(f"Round {server_round} cids: {cids}")
+        now = time.time()
+        for client, fit_res in results:
+            if client.cid not in self.clients.keys():
+                client_reputation = ClientReputation(client.cid)
+                self.clients[client.cid] = client_reputation
+            # compute Mean, Std and Cov
+        for client, fit_res in results:
+            self.clients[client.cid].update_scores(fit_res, now)
+        if server_round == 1:
+            # conv^t = 0
+            a = None
+        else:
+            # conv^t = # Measure stable training
+            a = None
+
+        # set anomaly rate
+
+        # update reliability threshold based on conv and anomaly rate
+
+        # Gradient Clipping
+
+        # Aggregation
+
+        # Reputation update for next round (decay, recovery)
+
         return super().aggregate_fit(server_round, results, failures)
 
+    def configure_fit(
+        self, server_round: int, parameters: Parameters, client_manager: ClientManager
+    ) -> list[tuple[ClientProxy, FitIns]]:
+        send_time = time.time()
+        """Configure the next round of training."""
+        config = {"send_time": send_time}
+        if self.on_fit_config_fn is not None:
+            # Custom fit config function provided
+            config = self.on_fit_config_fn(server_round)
+        fit_ins = FitIns(parameters, config)
+
+        # Sample clients
+        sample_size, min_num_clients = self.num_fit_clients(
+            client_manager.num_available()
+        )
+        clients = client_manager.sample(
+            num_clients=sample_size, min_num_clients=min_num_clients
+        )
+
+        # Return client/config pairs
+        return [(client, fit_ins) for client in clients]
 def server_fn(context: Context):
     # Read from config
     num_rounds = context.run_config["num-server-rounds"]

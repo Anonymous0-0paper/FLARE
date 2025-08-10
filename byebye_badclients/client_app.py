@@ -1,4 +1,5 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
+import time
 from collections import Counter
 
 import torch
@@ -6,7 +7,7 @@ import torchvision
 
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context
-from byebye_badclients.task import Net, get_weights, load_data, set_weights, test, train, NetMNIST
+from byebye_badclients.task import Net, get_weights, load_data, set_weights, test, train, NetMNIST, get_update
 from sklearn import metrics
 
 def get_class_distribution(dataloader):
@@ -35,7 +36,12 @@ class FlowerClient(NumPyClient):
         self.cid = cid
 
     def fit(self, parameters, config):
+        receive_time = time.time()
+        server_send_time = config["send_time"]
+
         set_weights(self.net, parameters)
+
+        train_start = time.time()
         if self.dataset_name == "cifar10":
             train_loss = train(
                 self.net,
@@ -52,11 +58,14 @@ class FlowerClient(NumPyClient):
                 self.device,
                 img_col_name="image"
             )
+        train_end = time.time()
         return (
-            get_weights(self.net),
+            get_update(self.net, parameters),
             len(self.trainloader.dataset),
             {"cid": self.cid,
-             "loss": train_loss},
+             "loss": train_loss,
+             "train_time": train_end-train_start,
+             "receive_time": receive_time - server_send_time},
         )
 
     def evaluate(self, parameters, config):
