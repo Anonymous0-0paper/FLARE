@@ -43,30 +43,22 @@ class FlowerClient(NumPyClient):
         server_send_time = config["send_time"]
 
         set_weights(self.net, parameters)
-
+        img_col_name = "img" if self.dataset_name == 'cifar10' else "image"
         train_start = time.time()
-        if self.dataset_name == "cifar10":
-            train_loss = train(
-                self.net,
-                self.trainloader,
-                self.local_epochs,
-                self.device,
-                img_col_name="img"
-            )
-        else:
-            train_loss = train(
-                self.net,
-                self.trainloader,
-                self.local_epochs,
-                self.device,
-                img_col_name="image"
-            )
+        train_loss, train_acc = train(
+            self.net,
+            self.trainloader,
+            self.local_epochs,
+            self.device,
+            img_col_name=img_col_name
+        )
         train_end = time.time()
         return (
             get_update(self.net, parameters),
             len(self.trainloader.dataset),
             {"cid": self.cid,
              "loss": train_loss,
+             "accuracy": train_acc,
              "train_time": train_end-train_start,
              "receive_time": receive_time - server_send_time,
              "role": str(self.role)},
@@ -74,10 +66,9 @@ class FlowerClient(NumPyClient):
 
     def evaluate(self, parameters, config):
         set_weights(self.net, parameters)
-        if self.dataset_name == "cifar10":
-            loss, accuracy, m = test(self.net, self.valloader, self.device, img_col_name="img")
-        else:
-            loss, accuracy, m = test(self.net, self.valloader, self.device, img_col_name="image")
+        img_col_name = "img" if self.dataset_name == 'cifar10' else "image"
+
+        loss, accuracy, m = test(self.net, self.valloader, self.device, img_col_name=img_col_name)
         y_pred = m["predictions"]
         labels = m["labels"]
 

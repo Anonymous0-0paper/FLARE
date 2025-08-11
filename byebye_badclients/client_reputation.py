@@ -58,7 +58,7 @@ class ClientReputation:
         print(f"Reputation Score (Client {self.cid}): {self.reputation_score}")
 
         self.update_classification(reliability_threshold=reliability_threshold)
-        print(f"Classification (Clien {self.cid}): {self.classification}")
+        print(f"Classification (Client {self.cid}): {self.classification}")
     def update_round_tracker(self):
         self.round_tracker += 1
         return self.round_tracker

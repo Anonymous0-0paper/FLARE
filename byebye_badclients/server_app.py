@@ -15,7 +15,6 @@ from flwr.server.strategy import FedAvg
 from flwr.common.logger import log
 from logging import WARNING
 
-from byebye_badclients.client_app import Role
 from byebye_badclients.result_processing import list_to_csv
 from byebye_badclients.task import Net, NetMNIST, get_weights, freeze_model
 from byebye_badclients.client_reputation import ClientReputation, Classification
@@ -172,9 +171,6 @@ class WeightedFedAvg(FedAvg):
         self.recovery = 0.05
         self.decay = 0.15
 
-    def convergence(self):
-        return 0.5 # TODO
-
     def aggregate_fit(self, server_round, results, failures):
         now = time.time()
         updates = {}
@@ -205,7 +201,6 @@ class WeightedFedAvg(FedAvg):
 
         anomaly_count = 0
         for client, fit_res in results:
-            update_vector = updates[client.cid]
             client_idx = cids.index(client.cid)
             reduced_update_vector = reduced_update_matrix[client_idx, :]
             self.clients[client.cid].update_scores(fit_res=fit_res, reduced_update_vector=reduced_update_vector, now=now, mean=mean, inv_covariance=inv_covariance,
@@ -216,15 +211,17 @@ class WeightedFedAvg(FedAvg):
                                                    penalty_severity=self.penalty_severity)
             if self.clients[client.cid].reputation_score < self.reliability_threshold / 2:
                 anomaly_count += 1
-        if server_round > 2:
-            self.conv = self.convergence()
 
         print("Updated Scores")
         # set anomaly rate
         self.anomaly_rate = anomaly_count / len(results)
-
         print(f"set anomaly rate: {self.anomaly_rate}")
-        # update reliability threshold based on conv and anomaly rate
+
+        # set conv
+        total_samples = np.sum([result.num_examples for _, result in results])
+        self.conv = np.sum([result.metrics["accuracy"] * result.num_examples for _, result in results]) / total_samples
+        print(f"conv: {self.conv}")
+        # update reliability_threshold based on conv and anomaly rate
         self.reliability_threshold += self.gamma * self.conv - self.delta * self.anomaly_rate
 
         print(f"set reliability threshold: {self.reliability_threshold}")
@@ -240,14 +237,16 @@ class WeightedFedAvg(FedAvg):
 
         # Aggregation
         trusted_suspicious_clients = [self.clients[client.cid] for client, _ in results if self.clients[client.cid].classification != Classification.UNTRUSTED]
-        aggregated_params = np.sum([client.reputation_score * client.num_examples * updates[client.cid] for client in trusted_suspicious_clients], axis=0)
-        aggregated_params /= np.sum([client.reputation_score * client.num_examples for client in trusted_suspicious_clients])
-        sizes = [arr.size for arr in self.current_parameters]
-        splits = np.cumsum(sizes)[:-1]
-        agg_split = np.split(aggregated_params, splits)
-        new_params = [curr + agg.reshape(curr.shape) for curr, agg in zip(self.current_parameters, agg_split)]
-        self.current_parameters = new_params
-
+        if trusted_suspicious_clients:
+            aggregated_params = np.sum([client.reputation_score * client.num_examples * updates[client.cid] for client in trusted_suspicious_clients], axis=0)
+            aggregated_params /= np.sum([client.reputation_score * client.num_examples for client in trusted_suspicious_clients])
+            sizes = [arr.size for arr in self.current_parameters]
+            splits = np.cumsum(sizes)[:-1]
+            agg_split = np.split(aggregated_params, splits)
+            new_params = [curr + agg.reshape(curr.shape) for curr, agg in zip(self.current_parameters, agg_split)]
+            self.current_parameters = new_params
+        else:
+            new_params = self.current_parameters
         # Metrics Aggregation
         metrics_aggregated = {}
         if self.fit_metrics_aggregation_fn:

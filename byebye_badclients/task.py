@@ -111,19 +111,21 @@ def train(net, trainloader, epochs, device, img_col_name="image"):
     criterion = torch.nn.CrossEntropyLoss().to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
     net.train()
-    running_loss = 0.0
+    correct, running_loss = 0, 0.0
     for _ in range(epochs):
         for i, batch in enumerate(trainloader):
-            images = batch[img_col_name]
-            labels = batch["label"]
+            images = batch[img_col_name].to(device)
+            labels = batch["label"].to(device)
             optimizer.zero_grad()
-            loss = criterion(net(images.to(device)), labels.to(device))
+            outputs = net(images)
+            loss = criterion(outputs, labels.to(device))
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
-
+            correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
+        accuracy = correct / len(trainloader.dataset)
     avg_trainloss = running_loss / len(trainloader)
-    return avg_trainloss
+    return avg_trainloss, accuracy
 
 
 def test(net, testloader, device, img_col_name="image"):
