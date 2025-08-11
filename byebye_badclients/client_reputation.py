@@ -1,9 +1,8 @@
+import statistics
+
 import numpy as np
-from flwr.common import FitRes
+from flwr.common import FitRes, parameters_to_ndarrays
 from sklearn import metrics
-from sympy.abc import alpha
-import time
-from util import *
 from enum import Enum
 from byebye_badclients.util import mahalanobis_distance
 
@@ -13,31 +12,53 @@ class Classification(Enum):
     UNTRUSTED = 2
 
 class ClientReputation:
-    def __init__(self, cid):
+    def __init__(self, cid, num_examples):
         self.cid = cid
+        self.num_examples = num_examples
         self.exp_mv_avg = None
-        self.performance_consistency_score = None
+        self.performance_consistency_score = 0.5
         self.statistical_anomaly_score = None
         self.temporal_behavior_score = None
         self.reputation_score = None
         self.classification = Classification.SUSPICIOUS
         self.round_tracker = 0
+        self.participations = 0
+        self.participation_rate = None
+        self.estimated_round_trip_times = []
 
     def update_scores(self,
-                      fit_res: FitRes, now: float,
-                      mean, inv_covariance, participation_rate, response_time_variance,
+                      fit_res: FitRes, reduced_update_vector,
+                      now: float,
+                      mean, inv_covariance, reliability_threshold,
                       reputation_weights, alpha=0.7, anomaly_threshold=5.99, penalty_severity = 2,
                       beta=0.6):
-        estimated_rtt = fit_res.metrics["receive_time"] * 2
-        self.update_round_tracker()
-        self.update_performance_consistency_score(update=fit_res.parameters, alpha=alpha)
-        distance = mahalanobis_distance(update=fit_res.parameters, mean=mean, inv_covariance=inv_covariance)
-        self.update_statistical_anomaly_score(update=fit_res.parameters, distance=distance,
-                                              anomaly_threshold=estimated_rtt, penalty_severity=penalty_severity)
-        self.update_temporal_behaviour_score(beta=beta, participation_rate=participation_rate,
-                                             response_time_variance=response_time_variance)
-        self.update_reputation_score(reputation_weights=reputation_weights)
 
+        self.update_round_tracker()
+
+        self.estimated_round_trip_times.append(fit_res.metrics["receive_time"] * 2 + fit_res.metrics["train_time"])
+        if len(self.estimated_round_trip_times) > 1:
+            response_time_variance = statistics.variance(self.estimated_round_trip_times)
+        else:
+            response_time_variance = 0
+
+        ndarrays = parameters_to_ndarrays(fit_res.parameters)
+        update_vector = np.concatenate([arr.ravel() for arr in ndarrays])
+        self.update_performance_consistency_score(update=update_vector, alpha=alpha)
+        print(f"Performance Consistency Score (Client {self.cid}): {self.performance_consistency_score}")
+
+        distance = mahalanobis_distance(update=reduced_update_vector, mean=mean, inv_covariance=inv_covariance)
+        self.update_statistical_anomaly_score(distance=distance, anomaly_threshold=anomaly_threshold,
+                                              penalty_severity=penalty_severity)
+        print(f"Statistical Anomaly Score (Client {self.cid}): {self.statistical_anomaly_score}")
+
+        self.update_temporal_behaviour_score(beta=beta, response_time_variance=response_time_variance)
+        print(f"Temporal Behavior Score (Client {self.cid}): {self.temporal_behavior_score}")
+
+        self.update_reputation_score(reputation_weights=reputation_weights)
+        print(f"Reputation Score (Client {self.cid}): {self.reputation_score}")
+
+        self.update_classification(reliability_threshold=reliability_threshold)
+        print(f"Classification (Clien {self.cid}): {self.classification}")
     def update_round_tracker(self):
         self.round_tracker += 1
         return self.round_tracker
@@ -49,21 +70,21 @@ class ClientReputation:
             self.exp_mv_avg = update * alpha + (1 - alpha) * self.exp_mv_avg
 
     def update_performance_consistency_score(self, update, alpha):
-
+        update = update.reshape(1, -1)
         self.update_exponential_moving_average(update, alpha=0.5)
-        cos_sim = metrics.pairwise.cosine_similarity(update, self.exp_mv_avg)
+        cos_sim = metrics.pairwise.cosine_similarity(update, self.exp_mv_avg)[0, 0]
         self.performance_consistency_score = alpha * self.performance_consistency_score + (1 - alpha) * cos_sim
-
         return self.performance_consistency_score
 
-    def update_statistical_anomaly_score(self, update, distance, anomaly_threshold, penalty_severity):
+    def update_statistical_anomaly_score(self, distance, anomaly_threshold, penalty_severity):
+        print(f"Distance: {distance}, Anomaly_threshold: {anomaly_threshold}, penalty_severity: {penalty_severity}")
         if distance <= anomaly_threshold:
             self.statistical_anomaly_score = 1
         else:
             self.statistical_anomaly_score = np.exp(-penalty_severity * (distance - anomaly_threshold))
 
-    def update_temporal_behaviour_score(self, beta, participation_rate, response_time_variance):
-        self.temporal_behavior_score = beta * participation_rate + (1 - beta) * 1 / (1 + response_time_variance)
+    def update_temporal_behaviour_score(self, beta, response_time_variance):
+        self.temporal_behavior_score = beta * self.participation_rate + (1 - beta) * 1 / (1 + response_time_variance)
         return self.temporal_behavior_score
 
     def update_reputation_score(self, reputation_weights):

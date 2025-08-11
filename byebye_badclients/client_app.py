@@ -1,20 +1,22 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
 import time
-from collections import Counter
+import random
 
 import torch
 import torchvision
 
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context
-from byebye_badclients.task import Net, get_weights, load_data, set_weights, test, train, NetMNIST, get_update
+from byebye_badclients.task import Net, load_data, set_weights, test, train, NetMNIST, get_update, \
+    freeze_model
 from sklearn import metrics
+from enum import Enum
 
 def get_class_distribution(dataloader):
     def add_label(counts, label):
-        if label not in class_counts:
-            class_counts[label] = 0
-        class_counts[label] += 1
+        if label not in counts:
+            counts[label] = 0
+        counts[label] += 1
 
     class_counts = {}
     for batch in dataloader:
@@ -25,7 +27,7 @@ def get_class_distribution(dataloader):
 
 # Define Flower Client and client_fn
 class FlowerClient(NumPyClient):
-    def __init__(self, net, trainloader, valloader, local_epochs, dataset_name, cid):
+    def __init__(self, net, trainloader, valloader, local_epochs, dataset_name, cid, role):
         self.net = net
         self.trainloader = trainloader
         self.valloader = valloader
@@ -34,6 +36,7 @@ class FlowerClient(NumPyClient):
         self.net.to(self.device)
         self.dataset_name = dataset_name
         self.cid = cid
+        self.role = role
 
     def fit(self, parameters, config):
         receive_time = time.time()
@@ -65,7 +68,8 @@ class FlowerClient(NumPyClient):
             {"cid": self.cid,
              "loss": train_loss,
              "train_time": train_end-train_start,
-             "receive_time": receive_time - server_send_time},
+             "receive_time": receive_time - server_send_time,
+             "role": str(self.role)},
         )
 
     def evaluate(self, parameters, config):
@@ -86,7 +90,19 @@ class FlowerClient(NumPyClient):
                                                    "loss": loss,
                                                    "recall_score": recall_score,
                                                    "precision_score": precision_score,
-                                                   "f1_score": f1_score}
+                                                   "f1_score": f1_score,
+                                                   "role": str(self.role)}
+
+class Role(Enum):
+    BENIGN = 0
+    MALICIOUS = 1
+
+def get_role(node_id):
+    rng = random.Random(node_id)
+    choices = [Role.MALICIOUS, Role.BENIGN]
+    probabilities = [0.3, 0.7]
+    return rng.choices(choices, weights=probabilities, k=1)[0]
+
 
 def client_fn(context: Context):
     hf_dataset = context.run_config["dataset"]
@@ -102,6 +118,8 @@ def client_fn(context: Context):
         net = Net()
     else:
         net = torchvision.models.resnet18(pretrained=True)
+        freeze_model(net)
+        net.fc = torch.nn.Linear(in_features=net.fc.in_features, out_features=10)
 
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
@@ -110,13 +128,10 @@ def client_fn(context: Context):
                                        non_iid=non_iid, dirichlet_alpha=dirichlet_alpha)
     local_epochs = context.run_config["local-epochs"]
 
-    # print("DEVICE: Cuda" if torch.cuda.is_available() else "Device: CPU")
-    # print(f"NODE_CONFIG: {context.node_config}\n"
-    #       f"PARTITION ID: {partition_id}\n"
-    #       f"CLASS_DISTRIBUTION: {get_class_distribution(trainloader)}")
+    role = get_role(partition_id)
 
     # Return Client instance
-    return FlowerClient(net, trainloader, valloader, local_epochs, dataset, cid=partition_id).to_client()
+    return FlowerClient(net, trainloader, valloader, local_epochs, dataset, cid=partition_id, role=role).to_client()
 
 
 # Flower ClientApp

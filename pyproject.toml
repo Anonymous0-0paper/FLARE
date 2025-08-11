@@ -34,12 +34,12 @@ clientapp = "byebye_badclients.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-num-server-rounds = 3
-fraction-fit = 0.5
+num-server-rounds = 10
+fraction-fit = 0.1
 local-epochs = 1
 dataset = 'ylecun/mnist' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10']
 total-max-samples = -1
-non-iid = true
+non-iid = false
 dirichlet-alpha = 0.5 # if non-iid == true
 
 # Default federation to use when running the app
@@ -48,7 +48,7 @@ default = "local-simulation"
 
 # Local simulation federation with 10 virtual SuperNodes
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 10
+options.num-supernodes = 100
 
 # Remote federation example for use with SuperLink
 [tool.flwr.federations.remote-federation]

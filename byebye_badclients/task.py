@@ -148,14 +148,19 @@ def test(net, testloader, device, img_col_name="image"):
     return loss, accuracy, {"predictions": np.concatenate(predictions), "labels": np.concatenate(prediction_labels)}
 
 
-def get_weights(net):
-    return [val.cpu().numpy() for _, val in net.state_dict().items()]
+def get_weights(net: nn.Module):
+    return [param.detach().cpu().numpy() for _, param in net.named_parameters() if param.requires_grad]
 
 def get_update(local_net, global_params):
     local_weights = get_weights(local_net)
     return [local - global_w for local, global_w in zip(local_weights, global_params)]
 
 def set_weights(net, parameters):
-    params_dict = zip(net.state_dict().keys(), parameters)
+    trainable_keys = [k for k, param in net.named_parameters() if param.requires_grad]
+    params_dict = zip(trainable_keys, parameters)
     state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-    net.load_state_dict(state_dict, strict=True)
+    net.load_state_dict(state_dict, strict=False)
+
+def freeze_model(net):
+    for param in net.parameters():
+        param.requires_grad = False
