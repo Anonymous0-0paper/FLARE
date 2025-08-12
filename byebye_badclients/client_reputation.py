@@ -31,12 +31,12 @@ class ClientReputation:
                       fit_res: FitRes, reduced_update_vector,
                       now: float,
                       mean, inv_covariance, reliability_threshold,
-                      reputation_weights, alpha=0.7, anomaly_threshold=5.99, penalty_severity = 2,
+                      reputation_weights, alpha=0.7, anomaly_threshold=5.99, penalty_severity = 2.0,
                       beta=0.6):
 
         self.update_round_tracker()
 
-        self.estimated_round_trip_times.append(fit_res.metrics["receive_time"] * 2 + fit_res.metrics["train_time"])
+        self.estimated_round_trip_times.append(fit_res.metrics["receive_time"] * 2.0 + fit_res.metrics["train_time"])
         if len(self.estimated_round_trip_times) > 1:
             response_time_variance = statistics.variance(self.estimated_round_trip_times)
         else:
@@ -68,7 +68,7 @@ class ClientReputation:
         if self.exp_mv_avg is None:
             self.exp_mv_avg = update.copy()
         else:
-            self.exp_mv_avg = alpha * update + (1 - alpha) * self.exp_mv_avg
+            self.exp_mv_avg = alpha * update + (1.0 - alpha) * self.exp_mv_avg
 
     def update_performance_consistency_score(self, update, alpha):
         update_1d = update.flatten()
@@ -81,19 +81,19 @@ class ClientReputation:
         if self.performance_consistency_score is None:
             self.performance_consistency_score = cos_sim
         else:
-            self.performance_consistency_score = alpha * self.performance_consistency_score + (1 - alpha) * cos_sim
+            self.performance_consistency_score = alpha * self.performance_consistency_score + (1.0 - alpha) * cos_sim
 
         return self.performance_consistency_score
 
     def update_statistical_anomaly_score(self, distance, anomaly_threshold, penalty_severity):
         print(f"Distance: {distance}, Anomaly_threshold: {anomaly_threshold}, penalty_severity: {penalty_severity}")
         if distance <= anomaly_threshold:
-            self.statistical_anomaly_score = 1
+            self.statistical_anomaly_score = 1.0
         else:
             self.statistical_anomaly_score = np.exp(-penalty_severity * (distance - anomaly_threshold))
 
     def update_temporal_behaviour_score(self, beta, response_time_variance):
-        self.temporal_behavior_score = beta * self.participation_rate + (1 - beta) * 1 / (1 + response_time_variance)
+        self.temporal_behavior_score = beta * self.participation_rate + (1.0 - beta) * 1.0 / (1.0 + response_time_variance)
         return self.temporal_behavior_score
 
     def update_reputation_score(self, reputation_weights):
@@ -105,17 +105,17 @@ class ClientReputation:
         self.reputation_score = np.dot(reputation_weights, scores)
         return self.reputation_score
 
-    def reputation_decay_recovery(self, reliability_threshold, recovery, decay):
+    def reputation_decay_recovery(self, recovery, decay):
         if self.classification == Classification.TRUSTED:
-            self.reputation_score = min(self.reputation_score + recovery, 1)
+            self.reputation_score = min(self.reputation_score + recovery, 1.0)
         else:
-            self.reputation_score = min(self.reputation_score - decay, 0)
+            self.reputation_score = max(self.reputation_score - decay, 0.0)
         return self.reputation_score
 
     def update_classification(self, reliability_threshold):
         if self.reputation_score >= reliability_threshold:
             self.classification = Classification.TRUSTED
-        elif self.reputation_score < reliability_threshold / 2:
+        elif self.reputation_score < reliability_threshold / 2.0:
             self.classification = Classification.UNTRUSTED
         else:
             self.classification = Classification.SUSPICIOUS

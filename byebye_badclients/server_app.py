@@ -168,7 +168,7 @@ class WeightedFedAvg(FedAvg):
         # Hyperparameters
         self.reliability_threshold = 0.5
         self.alpha = 0.7
-        self.beta = 0.01
+        self.beta = 0.6
         self.anomaly_threshold = 5.99
         self.penalty_severity = 5
         self.gamma = 0.3
@@ -277,7 +277,7 @@ class WeightedFedAvg(FedAvg):
 
         # Reputation update for next round (decay, recovery)
         for client, _ in results:
-            self.clients[client.cid].reputation_decay_recovery(self.reliability_threshold, self.recovery, self.decay)
+            self.clients[client.cid].reputation_decay_recovery(recovery=self.recovery, decay=self.decay)
 
         aggregation_time = time.time()
 
@@ -389,13 +389,14 @@ class WeightedFedAvg(FedAvg):
                 client_reputation[cid] = 0.5
             else:
                 client_reputation[cid] = self.clients[cid].reputation_score
+                if client_reputation[cid] == 0:
+                    client_reputation[cid] += 0.01
 
         def reputations_to_weights(reputations):
             return [reputation / np.sum(reputations) for reputation in reputations]
 
         choices = list(client_reputation.keys())
         weights = reputations_to_weights(list(client_reputation.values()))
-
         sampled_client_keys = np.random.choice(a=choices, size=sample_size, p=weights, replace=False)
         sampled_clients = [client for str, client in clients.items() if client.cid in sampled_client_keys]
         return [(client, fit_ins) for client in sampled_clients]

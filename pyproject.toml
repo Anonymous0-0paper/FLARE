@@ -34,7 +34,7 @@ clientapp = "byebye_badclients.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-num-server-rounds = 10
+num-server-rounds = 50
 fraction-fit = 0.1
 local-epochs = 5
 dataset = 'ylecun/mnist' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10']
@@ -42,7 +42,7 @@ total-max-samples = -1
 non-iid = false
 dirichlet-alpha = 0.5 # if non-iid == true
 malicious-probability = 0.3
-attack-patterns = 'label-flipping,random-update,update-scaling' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack'] and separate by comma
+attack-patterns = 'label-flipping,random-update,update-scaling,adaptive-attack' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack'] and separate by comma
 update-scaling-factor = 2
 
 # Default federation to use when running the app
