@@ -1,11 +1,10 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
 import os
 import time
+import random
 from typing import Optional
 
 import numpy as np
-import torch
-import torchvision
 
 from flwr.common import Context, ndarrays_to_parameters, Parameters, FitIns, parameters_to_ndarrays, \
     MetricsAggregationFn
@@ -15,10 +14,15 @@ from flwr.server.strategy import FedAvg
 from flwr.common.logger import log
 from logging import WARNING
 
-from byebye_badclients.result_processing import list_to_csv
-from byebye_badclients.task import Net, NetMNIST, get_weights, freeze_model
+from byebye_badclients.client_app import Role
+from byebye_badclients.result_processing import list_to_csv, robustness_metric, hard_rate_metric, dict_to_csv, \
+    soft_target_exclusion_rate_metric, soft_target_inclusion_rate_metric
+from byebye_badclients.task import get_weights
 from byebye_badclients.client_reputation import ClientReputation, Classification
-from sklearn.random_projection import GaussianRandomProjection
+from sklearn.decomposition import PCA
+
+from byebye_badclients.util import load_model
+from sklearn.covariance import LedoitWolf
 
 def process_evaluate_results(results: dict[str, list[float]], dataset: str):
     dataset_name = dataset.split('/')[-1]
@@ -28,19 +32,19 @@ def process_evaluate_results(results: dict[str, list[float]], dataset: str):
     '''Model Performance Results'''
 
     filepath = os.path.join(base_path, "weighted_avg_evaluation_loss.csv")
-    list_to_csv(l=results["weighted_avg_loss"], filepath=filepath)
+    list_to_csv(l=results["weighted_avg_loss"], filepath=filepath, column_name="weighted_avg_loss")
 
     filepath = os.path.join(base_path, "accuracy.csv")
-    list_to_csv(l=results["weighted_avg_accuracy"], filepath=filepath)
+    list_to_csv(l=results["weighted_avg_accuracy"], filepath=filepath, column_name="weighted_avg_accuracy")
 
     filepath = os.path.join(base_path, "recall_scores.csv")
-    list_to_csv(l=results["weighted_avg_recall_score"], filepath=filepath)
+    list_to_csv(l=results["weighted_avg_recall_score"], filepath=filepath, column_name="weighted_avg_recall_score")
 
     filepath = os.path.join(base_path, "precision_scores.csv")
-    list_to_csv(l=results["weighted_avg_precision_score"], filepath=filepath)
+    list_to_csv(l=results["weighted_avg_precision_score"], filepath=filepath, column_name="weighted_avg_precision_score")
 
     filepath = os.path.join(base_path, "f1-scores.csv")
-    list_to_csv(l=results["weighted_avg_f1_score"], filepath=filepath)
+    list_to_csv(l=results["weighted_avg_f1_score"], filepath=filepath, column_name="weighted_avg_f1_score")
 
 
 evaluate_results = None
@@ -73,7 +77,7 @@ def process_fit_results(results: dict[str, list[float]], dataset: str):
 
     '''Global Results'''
     filepath = os.path.join(base_path, "weighted_avg_loss.csv")
-    list_to_csv(l=results["weighted_avg_loss"], filepath=filepath)
+    list_to_csv(l=results["weighted_avg_loss"], filepath=filepath, column_name="weighted_avg_loss")
 
 fit_results = None
 collect_fit_results_call_tracker = None
@@ -150,8 +154,9 @@ def get_evaluate_metrics_aggregation_fn(context: Context):
 
 
 class WeightedFedAvg(FedAvg):
-    def __init__(self, fit_metrics_aggregation_fn: Optional[MetricsAggregationFn] = None, **kwargs):
+    def __init__(self, server_rounds, fit_metrics_aggregation_fn: Optional[MetricsAggregationFn] = None, **kwargs):
         super().__init__(**kwargs)
+        self.server_rounds = server_rounds
         self.fit_metrics_aggregation_fn = fit_metrics_aggregation_fn
         self.current_parameters = parameters_to_ndarrays(self.initial_parameters)
         self.clients = {}
@@ -159,48 +164,65 @@ class WeightedFedAvg(FedAvg):
         self.anomaly_rate = None
         self.conv = 0
         self.last_two_updates = (None, None)
-        self.reputation_weights = (1, 1, 1)
+        self.reputation_weights = (0.5, 0.5, 0.5)
         # Hyperparameters
         self.reliability_threshold = 0.5
         self.alpha = 0.7
-        self.beta = 0.6
+        self.beta = 0.01
         self.anomaly_threshold = 5.99
-        self.penalty_severity = 2
+        self.penalty_severity = 5
         self.gamma = 0.3
         self.delta = 0.4
         self.recovery = 0.05
         self.decay = 0.15
-
+        # Metrics
+        self.robustness_score = {}
+        self.soft_malicious_exclusion_rate = {}
+        self.hard_malicious_exclusion_rate = {}
+        self.soft_malicious_inclusion_rate = {}
+        self.hard_malicious_inclusion_rate = {}
+        self.soft_benign_inclusion_rate = {}
+        self.hard_benign_inclusion_rate = {}
+        self.soft_benign_exclusion_rate = {}
+        self.hard_benign_exclusion_rate = {}
     def aggregate_fit(self, server_round, results, failures):
         now = time.time()
-        updates = {}
+        if not results:
+            return None, {}
+        # Do not aggregate if there are failures and failures are not accepted
+        if not self.accept_failures and failures:
+            return None, {}
 
         # Client Registration
+        updates = {}
         for client, fit_res in results:
             if client.cid not in self.clients.keys():
-                client_reputation = ClientReputation(cid=client.cid, num_examples=fit_res.num_examples)
+                client_reputation = ClientReputation(cid=client.cid, num_examples=fit_res.num_examples, role=fit_res.metrics["role"])
                 self.clients[client.cid] = client_reputation
             ndarrays = parameters_to_ndarrays(fit_res.parameters)
             update_vector = np.concatenate([arr.ravel() for arr in ndarrays])
             updates[client.cid] = update_vector
             self.clients[client.cid].participations += 1
             self.clients[client.cid].participation_rate = self.clients[client.cid].participations / server_round
-        print(f"Registered {len(results)} clients!")
 
         # Update Scores
-        rp = GaussianRandomProjection(n_components=50)
-        cids = list(updates.keys())
-        update_matrix = np.stack([updates[cid] for cid in cids])
-        reduced_update_matrix = rp.fit_transform(update_matrix)
-        mean = np.mean(reduced_update_matrix, axis=0)
-
-        cov = np.cov(reduced_update_matrix.T)
-        epsilon = 1e-6
-        cov_reg = cov + epsilon * np.eye(cov.shape[0])
-        inv_covariance = np.linalg.inv(cov_reg)
 
         anomaly_count = 0
+        pca = PCA(n_components=8)
+        cids = list(updates.keys())
+        update_matrix = np.stack([updates[cid] for cid in cids])
+        reduced_update_matrix = pca.fit_transform(update_matrix)
+
         for client, fit_res in results:
+            print(f"Behavior: {fit_res.metrics["role"]}")
+            others_reduced_update_matrix = np.delete(reduced_update_matrix, cids.index(client.cid), axis=0)
+            mean = np.mean(others_reduced_update_matrix, axis=0)
+
+            lw = LedoitWolf()
+            lw.fit(others_reduced_update_matrix)
+            cov = lw.covariance_
+            inv_covariance = lw.precision_
+
             client_idx = cids.index(client.cid)
             reduced_update_vector = reduced_update_matrix[client_idx, :]
             self.clients[client.cid].update_scores(fit_res=fit_res, reduced_update_vector=reduced_update_vector, now=now, mean=mean, inv_covariance=inv_covariance,
@@ -212,19 +234,19 @@ class WeightedFedAvg(FedAvg):
             if self.clients[client.cid].reputation_score < self.reliability_threshold / 2:
                 anomaly_count += 1
 
-        print("Updated Scores")
-        # set anomaly rate
+        # Success Rate related Metrics
+        client_ids = list(updates.keys())
+        self.handle_robustness_metrics(server_round, client_ids)
+
+        # set anomaly raterole == Role.MALICIOUS
         self.anomaly_rate = anomaly_count / len(results)
-        print(f"set anomaly rate: {self.anomaly_rate}")
 
         # set conv
         total_samples = np.sum([result.num_examples for _, result in results])
         self.conv = np.sum([result.metrics["accuracy"] * result.num_examples for _, result in results]) / total_samples
-        print(f"conv: {self.conv}")
         # update reliability_threshold based on conv and anomaly rate
         self.reliability_threshold += self.gamma * self.conv - self.delta * self.anomaly_rate
 
-        print(f"set reliability threshold: {self.reliability_threshold}")
         # Gradient Clipping
         norms = np.array([np.linalg.norm(update) for update in updates.values()])
         c = np.median(norms)
@@ -232,8 +254,6 @@ class WeightedFedAvg(FedAvg):
             norm = np.linalg.norm(update)
             scale = min(1, c / norm)
             updates[cid] = update * scale
-
-        print(f"Gradient Clipping done.")
 
         # Aggregation
         trusted_suspicious_clients = [self.clients[client.cid] for client, _ in results if self.clients[client.cid].classification != Classification.UNTRUSTED]
@@ -259,24 +279,98 @@ class WeightedFedAvg(FedAvg):
         for client, _ in results:
             self.clients[client.cid].reputation_decay_recovery(self.reliability_threshold, self.recovery, self.decay)
 
+        aggregation_time = time.time()
 
-        id_changed = 0
-        for client, fit_res in results:
-            if client.cid not in self.role_distribution:
-                self.role_distribution[client.cid] = fit_res.metrics["role"]
-            if self.role_distribution[client.cid] != fit_res.metrics["role"]:
-                id_changed += 1
-                print("Client ID changed.")
-        print(f"Malicious clients: {len([v for v in self.role_distribution.values() if v == "Role.MALICIOUS"])}/{len(self.role_distribution)}")
-        print(f"Ids changed: {id_changed}")
         return ndarrays_to_parameters(new_params) , metrics_aggregated
+
+    def handle_robustness_metrics(self, server_round, client_ids):
+        # Calculate Robustness Score
+        self.robustness_score[server_round] = robustness_metric(
+            {cid: client for cid, client in self.clients.items() if client.cid in client_ids}, self.reliability_threshold)
+
+        # Calculate Soft Malicious Exclusion Rate (including Suspicious ones partially)
+        malicious_clients = {cid: client for cid, client in self.clients.items() if
+                             client.cid in client_ids and client.role == str(Role.MALICIOUS)}
+        self.soft_malicious_exclusion_rate[server_round] = soft_target_exclusion_rate_metric(malicious_clients, self.reliability_threshold)
+
+        len_malicious_clients = len(malicious_clients)
+
+        # Calculate Hard Malicious Exclusion Rate
+        num_untrusted_malicious_clients = len(
+            {client for _, client in malicious_clients.items() if client.classification == Classification.UNTRUSTED})
+        self.hard_malicious_exclusion_rate[server_round] = hard_rate_metric(len_malicious_clients,
+                                                                        num_untrusted_malicious_clients)
+
+        # Calculate Hard Malicious Inclusion Rate
+        num_trusted_malicious_clients = len(
+            {client for _, client in malicious_clients.items() if client.classification == Classification.TRUSTED})
+        self.hard_malicious_inclusion_rate[server_round] = hard_rate_metric(len_malicious_clients, num_trusted_malicious_clients)
+
+        # Calculate Soft Malicious Inclusion Rate
+        self.soft_malicious_inclusion_rate[server_round] = soft_target_inclusion_rate_metric(malicious_clients, self.reliability_threshold)
+
+        # Calculate Soft Benign Inclusion Rate (including Suspicious ones partially)
+        benign_clients = {cid: client for cid, client in self.clients.items() if
+                          client.cid in client_ids and client.role == str(Role.BENIGN)}
+        self.soft_benign_inclusion_rate[server_round] = soft_target_inclusion_rate_metric(benign_clients,
+                                                                                          self.reliability_threshold)
+        len_benign_clients = len(benign_clients)
+        # Calculate Hard Benign Inclusion Rate
+        num_trusted_benign_clients = len(
+            {client for _, client in benign_clients.items() if client.classification == Classification.TRUSTED})
+        self.hard_benign_inclusion_rate[server_round] = hard_rate_metric(len_benign_clients, num_trusted_benign_clients)
+
+        # Calculate Soft Benign Inclusion Rate (including Suspicious ones partially)
+        self.soft_benign_exclusion_rate[server_round] = soft_target_exclusion_rate_metric(benign_clients, self.reliability_threshold)
+
+        # Calculate Hard Benign Exclusion Rate
+        num_untrusted_benign_clients = len(
+            {client for _, client in benign_clients.items() if client.classification == Classification.UNTRUSTED}
+        )
+        self.hard_benign_exclusion_rate[server_round] = hard_rate_metric(len_benign_clients, num_untrusted_benign_clients)
+
+        if server_round == self.server_rounds:
+            self.robustness_metrics_to_csvs()
+
+    def robustness_metrics_to_csvs(self):
+        base_path = os.path.abspath(f"plots/robustness/")
+        os.makedirs(base_path, exist_ok=True)
+
+        filepath = os.path.join(base_path, "robustness_score.csv")
+        dict_to_csv(d=self.robustness_score, filepath=filepath, column_name="robustness_score")
+
+        filepath = os.path.join(base_path, "hard_malicious_detection_rate.csv")
+        dict_to_csv(d=self.hard_malicious_exclusion_rate, filepath=filepath, column_name="hard_malicious_detection_rate")
+
+        filepath = os.path.join(base_path, "soft_malicious_detection_rate.csv")
+        dict_to_csv(d=self.soft_malicious_exclusion_rate, filepath=filepath, column_name="soft_malicious_detection_rate")
+
+        filepath = os.path.join(base_path, "soft_malicious_inclusion_rate.csv")
+        dict_to_csv(d=self.soft_malicious_inclusion_rate, filepath=filepath, column_name="soft_malicious_inclusion_rate")
+
+        filepath = os.path.join(base_path, "hard_malicious_inclusion_rate.csv")
+        dict_to_csv(d=self.hard_malicious_inclusion_rate, filepath=filepath, column_name="hard_malicious_inclusion_rate")
+
+        filepath = os.path.join(base_path, "hard_benign_inclusion_rate.csv")
+        dict_to_csv(d=self.hard_benign_inclusion_rate, filepath=filepath, column_name="hard_benign_inclusion_rate")
+
+        filepath = os.path.join(base_path, "soft_benign_inclusion_rate.csv")
+        dict_to_csv(d=self.soft_benign_inclusion_rate, filepath=filepath, column_name="soft_benign_inclusion_rate")
+
+        filepath = os.path.join(base_path, "soft_benign_exclusion_rate.csv")
+        dict_to_csv(d=self.soft_benign_exclusion_rate, filepath=filepath, column_name="soft_benign_exclusion_rate")
+
+        filepath = os.path.join(base_path, "hard_benign_exclusion_rate.csv")
+        dict_to_csv(d=self.hard_benign_exclusion_rate, filepath=filepath, column_name="hard_benign_exclusion_rate")
 
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager
     ) -> list[tuple[ClientProxy, FitIns]]:
-        send_time = time.time()
         """Configure the next round of training."""
+
+        send_time = time.time()
         config = {"send_time": send_time}
+
         if self.on_fit_config_fn is not None:
             # Custom fit config function provided
             config = self.on_fit_config_fn(server_round)
@@ -286,12 +380,25 @@ class WeightedFedAvg(FedAvg):
         sample_size, min_num_clients = self.num_fit_clients(
             client_manager.num_available()
         )
-        clients = client_manager.sample(
-            num_clients=sample_size, min_num_clients=min_num_clients
-        )
 
-        # Return client/config pairs
-        return [(client, fit_ins) for client in clients]
+        clients = client_manager.all()
+        client_map = {client.cid: client for _, client in clients.items()}
+        client_reputation = {}
+        for cid, client in client_map.items():
+            if cid not in self.clients:
+                client_reputation[cid] = 0.5
+            else:
+                client_reputation[cid] = self.clients[cid].reputation_score
+
+        def reputations_to_weights(reputations):
+            return [reputation / np.sum(reputations) for reputation in reputations]
+
+        choices = list(client_reputation.keys())
+        weights = reputations_to_weights(list(client_reputation.values()))
+
+        sampled_client_keys = np.random.choice(a=choices, size=sample_size, p=weights, replace=False)
+        sampled_clients = [client for str, client in clients.items() if client.cid in sampled_client_keys]
+        return [(client, fit_ins) for client in sampled_clients]
 
 def server_fn(context: Context):
     # Read from config
@@ -301,19 +408,14 @@ def server_fn(context: Context):
 
     # Initialize model parameters
     dataset = hf_dataset.split('/')[-1]
-    if dataset == 'mnist':
-        net = NetMNIST()
-    elif dataset == 'cifar10':
-        net = Net()
-    else:
-        net = torchvision.models.resnet18(pretrained=True)
-        freeze_model(net)
-        net.fc = torch.nn.Linear(in_features=net.fc.in_features, out_features=10)
+    net = load_model(dataset)
+
     ndarrays = get_weights(net)
     parameters = ndarrays_to_parameters(ndarrays)
 
     # Define strategy
     strategy = WeightedFedAvg(
+        server_rounds=num_rounds,
         fraction_fit=fraction_fit,
         fraction_evaluate=1.0,
         min_available_clients=2,

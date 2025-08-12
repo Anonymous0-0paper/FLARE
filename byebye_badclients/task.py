@@ -104,8 +104,21 @@ def load_data(partition_id: int, num_partitions: int, dataset: str, total_max_sa
     testloader = DataLoader(partition_train_test["test"], batch_size=32)
     return trainloader, testloader
 
+def flip_labels_fn(labels):
+    return (labels + 1) % 10
 
-def train(net, trainloader, epochs, device, img_col_name="image"):
+
+def random_update_fn(net: nn.modules.Module):
+    params = net.parameters()
+    for param in params:
+        param.data = torch.randn_like(param.data)  # Normal distribution with µ = 0 and std = 1
+
+def update_scaling_fn(net: nn.modules.Module, factor: float):
+    params = net.parameters()
+    for param in params:
+        param.data *= factor
+
+def train(net, trainloader, epochs, device, img_col_name="image", flip_labels=False, random_update=False, update_scaling=False, factor=2):
     """Train the model on the training set."""
     net.to(device)  # move model to GPU if available
     criterion = torch.nn.CrossEntropyLoss().to(device)
@@ -116,6 +129,8 @@ def train(net, trainloader, epochs, device, img_col_name="image"):
         for i, batch in enumerate(trainloader):
             images = batch[img_col_name].to(device)
             labels = batch["label"].to(device)
+            if flip_labels:
+                labels = flip_labels_fn(labels)
             optimizer.zero_grad()
             outputs = net(images)
             loss = criterion(outputs, labels.to(device))
@@ -123,10 +138,13 @@ def train(net, trainloader, epochs, device, img_col_name="image"):
             optimizer.step()
             running_loss += loss.item()
             correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
-        accuracy = correct / len(trainloader.dataset)
+    accuracy = correct / (len(trainloader.dataset) * epochs)
     avg_trainloss = running_loss / len(trainloader)
+    if random_update:
+        random_update_fn(net)
+    elif update_scaling:
+        update_scaling_fn(net, factor=factor)
     return avg_trainloss, accuracy
-
 
 def test(net, testloader, device, img_col_name="image"):
     """Validate the model on the test set."""
