@@ -122,9 +122,11 @@ def train(net, trainloader, epochs, device, img_col_name="image", flip_labels=Fa
     """Train the model on the training set."""
     net.to(device)  # move model to GPU if available
     criterion = torch.nn.CrossEntropyLoss().to(device)
-    optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
+    optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
     net.train()
-    correct, running_loss = 0, 0.0
+    running_loss = 0.0
+    total = 0
+    correct = 0
     for _ in range(epochs):
         for i, batch in enumerate(trainloader):
             images = batch[img_col_name].to(device)
@@ -137,9 +139,10 @@ def train(net, trainloader, epochs, device, img_col_name="image", flip_labels=Fa
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
-            correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
-    accuracy = correct / (len(trainloader.dataset) * epochs)
-    avg_trainloss = running_loss / len(trainloader)
+            correct += (outputs.argmax(1) == labels).sum().item()
+            total += labels.size(0)
+    accuracy = correct / total
+    avg_trainloss = running_loss / (len(trainloader) * epochs)
     if random_update:
         random_update_fn(net)
     elif update_scaling:

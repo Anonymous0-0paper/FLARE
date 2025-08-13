@@ -12,7 +12,7 @@ class Classification(Enum):
     UNTRUSTED = 2
 
 class ClientReputation:
-    def __init__(self, cid, num_examples, role):
+    def __init__(self, cid, num_examples, role, attack_pattern):
         self.cid = cid
         self.num_examples = num_examples
         self.exp_mv_avg = None
@@ -26,6 +26,7 @@ class ClientReputation:
         self.participations = 0
         self.participation_rate = None
         self.estimated_round_trip_times = []
+        self.attack_pattern = attack_pattern
 
     def update_scores(self,
                       fit_res: FitRes, reduced_update_vector,

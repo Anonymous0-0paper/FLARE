@@ -1,7 +1,6 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
 import os
 import time
-import random
 from typing import Optional
 
 import numpy as np
@@ -14,6 +13,8 @@ from flwr.server.strategy import FedAvg
 from flwr.common.logger import log
 from logging import WARNING
 
+from sklearn.exceptions import UndefinedMetricWarning
+
 from byebye_badclients.client_app import Role
 from byebye_badclients.result_processing import list_to_csv, robustness_metric, hard_rate_metric, dict_to_csv, \
     soft_target_exclusion_rate_metric, soft_target_inclusion_rate_metric
@@ -24,9 +25,15 @@ from sklearn.decomposition import PCA
 from byebye_badclients.util import load_model
 from sklearn.covariance import LedoitWolf
 
-def process_evaluate_results(results: dict[str, list[float]], dataset: str):
-    dataset_name = dataset.split('/')[-1]
-    base_path = os.path.abspath(f"plots/{dataset_name}")
+import warnings
+# Ignore deprecation warnings from datasets/dill
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Completely ignore sklearn undefined metric warnings
+warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
+
+def process_evaluate_results(results: dict[str, list[float]]):
+    base_path = os.path.abspath(f"plots/performance/")
     os.makedirs(base_path, exist_ok=True)
 
     '''Model Performance Results'''
@@ -51,7 +58,6 @@ evaluate_results = None
 collect_evaluate_results_call_tracker = None
 def collect_evaluate_results(metrics_dict: dict[str, float], context: Context):
     num_rounds = context.run_config["num-server-rounds"]
-    hf_dataset = context.run_config["dataset"]
 
     global collect_evaluate_results_call_tracker
     if collect_evaluate_results_call_tracker is None:
@@ -68,11 +74,10 @@ def collect_evaluate_results(metrics_dict: dict[str, float], context: Context):
         evaluate_results[k].append(v)
 
     if collect_evaluate_results_call_tracker >= num_rounds:
-        process_evaluate_results(results=evaluate_results, dataset=hf_dataset)
+        process_evaluate_results(results=evaluate_results)
 
-def process_fit_results(results: dict[str, list[float]], dataset: str):
-    dataset_name = dataset.split('/')[-1]
-    base_path = os.path.abspath(f"plots/{dataset_name}")
+def process_fit_results(results: dict[str, list[float]]):
+    base_path = os.path.abspath(f"plots/performance")
     os.makedirs(base_path, exist_ok=True)
 
     '''Global Results'''
@@ -83,7 +88,6 @@ fit_results = None
 collect_fit_results_call_tracker = None
 def collect_fit_results(metrics_dict: dict[str, float], context: Context):
     num_rounds = context.run_config["num-server-rounds"]
-    hf_dataset = context.run_config["dataset"]
 
     global collect_fit_results_call_tracker
     if collect_fit_results_call_tracker is None:
@@ -100,7 +104,7 @@ def collect_fit_results(metrics_dict: dict[str, float], context: Context):
         fit_results[k].append(v)
 
     if collect_fit_results_call_tracker >= num_rounds:
-        process_fit_results(results=fit_results, dataset=hf_dataset)
+        process_fit_results(results=fit_results)
 
 def get_fit_metrics_aggregation_fn(context: Context):
     def fit_metrics_aggregation_fn(metrics: list[tuple[int, dict[str, bool | bytes | float | int | str]]]):
@@ -151,10 +155,10 @@ def get_evaluate_metrics_aggregation_fn(context: Context):
         return ret_dict
     return evaluate_metrics_aggregation_fn
 
-
-
 class WeightedFedAvg(FedAvg):
-    def __init__(self, server_rounds, fit_metrics_aggregation_fn: Optional[MetricsAggregationFn] = None, **kwargs):
+    def __init__(self, server_rounds, fit_metrics_aggregation_fn: Optional[MetricsAggregationFn] = None,
+                 base_reliability_threshold=0.5, alpha=0.7, beta=0.6, anomaly_threshold=5.99, penalty_severity=5,
+                 gamma=0.3, delta=0.4, recovery=0.05, decay=0.15, **kwargs):
         super().__init__(**kwargs)
         self.server_rounds = server_rounds
         self.fit_metrics_aggregation_fn = fit_metrics_aggregation_fn
@@ -164,19 +168,23 @@ class WeightedFedAvg(FedAvg):
         self.anomaly_rate = None
         self.conv = 0
         self.last_two_updates = (None, None)
-        self.reputation_weights = (0.5, 0.5, 0.5)
+        self.reputation_weights = (0.3, 0.3, 0.3)
+        self.reliability_threshold = base_reliability_threshold
         # Hyperparameters
-        self.reliability_threshold = 0.5
-        self.alpha = 0.7
-        self.beta = 0.6
-        self.anomaly_threshold = 5.99
-        self.penalty_severity = 5
-        self.gamma = 0.3
-        self.delta = 0.4
-        self.recovery = 0.05
-        self.decay = 0.15
+        self.base_reliability_threshold = base_reliability_threshold
+        self.alpha = alpha
+        self.beta = beta
+        self.anomaly_threshold = anomaly_threshold
+        self.penalty_severity = penalty_severity
+        self.gamma = gamma
+        self.delta = delta
+        self.recovery = recovery
+        self.decay = decay
         # Metrics
         self.robustness_score = {}
+        self.num_trusted_clients = {}
+        self.num_untrusted_clients = {}
+        self.num_suspicious_clients = {}
         self.soft_malicious_exclusion_rate = {}
         self.hard_malicious_exclusion_rate = {}
         self.soft_malicious_inclusion_rate = {}
@@ -187,17 +195,22 @@ class WeightedFedAvg(FedAvg):
         self.hard_benign_exclusion_rate = {}
     def aggregate_fit(self, server_round, results, failures):
         now = time.time()
+
         if not results:
             return None, {}
         # Do not aggregate if there are failures and failures are not accepted
         if not self.accept_failures and failures:
             return None, {}
 
+        self.num_trusted_clients[server_round] = 0
+        self.num_untrusted_clients[server_round] = 0
+        self.num_suspicious_clients[server_round] = 0
+
         # Client Registration
         updates = {}
         for client, fit_res in results:
             if client.cid not in self.clients.keys():
-                client_reputation = ClientReputation(cid=client.cid, num_examples=fit_res.num_examples, role=fit_res.metrics["role"])
+                client_reputation = ClientReputation(cid=client.cid, num_examples=fit_res.num_examples, role=fit_res.metrics["role"], attack_pattern=fit_res.metrics["attack_pattern"])
                 self.clients[client.cid] = client_reputation
             ndarrays = parameters_to_ndarrays(fit_res.parameters)
             update_vector = np.concatenate([arr.ravel() for arr in ndarrays])
@@ -214,7 +227,8 @@ class WeightedFedAvg(FedAvg):
         reduced_update_matrix = pca.fit_transform(update_matrix)
 
         for client, fit_res in results:
-            print(f"Behavior: {fit_res.metrics["role"]}")
+            print(f"Behavior: {fit_res.metrics["role"]}" + (f" Attack Pattern: {self.clients[client.cid].attack_pattern}" if
+                  self.clients[client.cid].role == str(Role.MALICIOUS) else ""))
             others_reduced_update_matrix = np.delete(reduced_update_matrix, cids.index(client.cid), axis=0)
             mean = np.mean(others_reduced_update_matrix, axis=0)
 
@@ -231,22 +245,31 @@ class WeightedFedAvg(FedAvg):
                                                    alpha=self.alpha, beta=self.beta,
                                                    anomaly_threshold=self.anomaly_threshold,
                                                    penalty_severity=self.penalty_severity)
-            if self.clients[client.cid].reputation_score < self.reliability_threshold / 2:
+            if self.clients[client.cid].classification == Classification.TRUSTED:
+                self.num_trusted_clients[server_round] += 1
+            elif self.clients[client.cid].classification == Classification.SUSPICIOUS:
+                self.num_suspicious_clients[server_round] += 1
+            else:
+                self.num_untrusted_clients[server_round] += 1
                 anomaly_count += 1
-
+            print("------------------------------------------------" + "\n"
+                  "------------------------------------------------")
         # Success Rate related Metrics
         client_ids = list(updates.keys())
         self.handle_robustness_metrics(server_round, client_ids)
 
-        # set anomaly raterole == Role.MALICIOUS
+        print("Reliability Threshold: ", self.reliability_threshold)
+
+        # set anomaly rate
         self.anomaly_rate = anomaly_count / len(results)
 
         # set conv
         total_samples = np.sum([result.num_examples for _, result in results])
         self.conv = np.sum([result.metrics["accuracy"] * result.num_examples for _, result in results]) / total_samples
-        # update reliability_threshold based on conv and anomaly rate
-        self.reliability_threshold += self.gamma * self.conv - self.delta * self.anomaly_rate
 
+        # update reliability_threshold based on conv and anomaly rate
+        self.reliability_threshold = self.base_reliability_threshold + self.gamma * self.conv - self.delta * self.anomaly_rate
+        print("Updated Reliability Threshold: ", self.reliability_threshold)
         # Gradient Clipping
         norms = np.array([np.linalg.norm(update) for update in updates.values()])
         c = np.median(norms)
@@ -363,6 +386,15 @@ class WeightedFedAvg(FedAvg):
         filepath = os.path.join(base_path, "hard_benign_exclusion_rate.csv")
         dict_to_csv(d=self.hard_benign_exclusion_rate, filepath=filepath, column_name="hard_benign_exclusion_rate")
 
+        filepath = os.path.join(base_path, "num_untrusted_clients.csv")
+        dict_to_csv(d=self.num_untrusted_clients, filepath=filepath, column_name="num_untrusted_clients")
+
+        filepath = os.path.join(base_path, "num_trusted_clients.csv")
+        dict_to_csv(d=self.num_trusted_clients, filepath=filepath, column_name="num_trusted_clients")
+
+        filepath = os.path.join(base_path, "num_suspicious_clients.csv")
+        dict_to_csv(d=self.num_suspicious_clients, filepath=filepath, column_name="num_suspicious_clients")
+
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager
     ) -> list[tuple[ClientProxy, FitIns]]:
@@ -403,9 +435,19 @@ class WeightedFedAvg(FedAvg):
 
 def server_fn(context: Context):
     # Read from config
+    no_defense_fedavg = context.run_config["no-defense-fedavg"]
     num_rounds = context.run_config["num-server-rounds"]
     fraction_fit = context.run_config["fraction-fit"]
     hf_dataset = context.run_config["dataset"]
+    base_reliability_threshold = context.run_config["base-reliability-threshold"]
+    alpha = context.run_config["alpha"]
+    beta = context.run_config["beta"]
+    anomaly_threshold = context.run_config["anomaly_threshold"]
+    penalty_severity = context.run_config["penalty_severity"]
+    gamma = context.run_config["gamma"]
+    delta = context.run_config["delta"]
+    recovery = context.run_config["recovery"]
+    decay = context.run_config["decay"]
 
     # Initialize model parameters
     dataset = hf_dataset.split('/')[-1]
@@ -415,15 +457,26 @@ def server_fn(context: Context):
     parameters = ndarrays_to_parameters(ndarrays)
 
     # Define strategy
-    strategy = WeightedFedAvg(
-        server_rounds=num_rounds,
-        fraction_fit=fraction_fit,
-        fraction_evaluate=1.0,
-        min_available_clients=2,
-        initial_parameters=parameters,
-        fit_metrics_aggregation_fn=get_fit_metrics_aggregation_fn(context),
-        evaluate_metrics_aggregation_fn=get_evaluate_metrics_aggregation_fn(context),
-    )
+    if no_defense_fedavg:
+        strategy = FedAvg(fraction_fit=fraction_fit,
+                          initial_parameters=parameters,
+                          fit_metrics_aggregation_fn=get_fit_metrics_aggregation_fn(context),
+                          evaluate_metrics_aggregation_fn=get_evaluate_metrics_aggregation_fn(context),
+                          on_fit_config_fn=lambda server_round: {"send_time": time.time()})
+    else:
+        strategy = WeightedFedAvg(
+            server_rounds=num_rounds,
+            base_reliability_threshold=base_reliability_threshold,
+            alpha=alpha, beta=beta, anomaly_threshold=anomaly_threshold,
+            penalty_severity=penalty_severity,
+            gamma=gamma, delta=delta, recovery=recovery, decay=decay,
+            fraction_fit=fraction_fit,
+            fraction_evaluate=1.0,
+            min_available_clients=2,
+            initial_parameters=parameters,
+            fit_metrics_aggregation_fn=get_fit_metrics_aggregation_fn(context),
+            evaluate_metrics_aggregation_fn=get_evaluate_metrics_aggregation_fn(context),
+        )
     config = ServerConfig(num_rounds=num_rounds)
 
     return ServerAppComponents(strategy=strategy, config=config)

@@ -6,7 +6,7 @@ import torch
 
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context
-from byebye_badclients.task import load_data, set_weights, test, train, get_update
+from byebye_badclients.task import load_data, set_weights, test, train, get_update, get_weights
 from sklearn import metrics
 from enum import Enum
 
@@ -27,7 +27,7 @@ def get_class_distribution(dataloader):
 
 # Define Flower Client and client_fn
 class FlowerClient(NumPyClient):
-    def __init__(self, net, trainloader, valloader, local_epochs, dataset_name, cid, role, attack_pattern, existing_attack_patterns, update_scaling_factor):
+    def __init__(self, net, trainloader, valloader, local_epochs, dataset_name, cid, role, attack_pattern, existing_attack_patterns, update_scaling_factor, no_defense_fedavg):
         self.net = net
         self.trainloader = trainloader
         self.valloader = valloader
@@ -40,6 +40,7 @@ class FlowerClient(NumPyClient):
         self.attack_pattern = attack_pattern
         self.existing_attack_patterns = existing_attack_patterns
         self.update_scaling_factor = update_scaling_factor
+        self.no_defense_fedavg = no_defense_fedavg
     def fit(self, parameters, config):
         receive_time = time.time()
 
@@ -67,8 +68,8 @@ class FlowerClient(NumPyClient):
                 if benign_malicious == Role.MALICIOUS:
                     choice = rng.choices(list(attack_patterns.keys()))[0]
                     attack_patterns[choice] = True
-        train_start = time.time()
 
+        train_start = time.time()
         train_loss, train_acc = train(
             self.net,
             self.trainloader,
@@ -81,15 +82,19 @@ class FlowerClient(NumPyClient):
             factor=self.update_scaling_factor
         )
         train_end = time.time()
+
+        parameters = get_weights(self.net) if self.no_defense_fedavg else get_update(self.net, parameters)
+
         return (
-            get_update(self.net, parameters),
+            parameters,
             len(self.trainloader.dataset),
             {"cid": self.cid,
              "loss": train_loss,
              "accuracy": train_acc,
-             "train_time": train_end-train_start,
-             "receive_time": receive_time - server_send_time,
-             "role": str(self.role)},
+             "train_time": (train_end - train_start),
+             "receive_time": (receive_time - server_send_time),
+             "role": str(self.role),
+             "attack_pattern": self.attack_pattern},
         )
     def evaluate(self, parameters, config):
         set_weights(self.net, parameters)
@@ -116,11 +121,16 @@ class Role(Enum):
     MALICIOUS = 1
 
 def get_role(node_id, malicious_probability, attack_patterns):
-    rng = random.Random(node_id)
-    choices = [Role.MALICIOUS, Role.BENIGN]
-    probabilities = [malicious_probability, 1-malicious_probability]
-
-    return rng.choices(choices, weights=probabilities, k=1)[0], rng.choices(attack_patterns, k=1)[0]
+    if attack_patterns:
+        rng = random.Random(node_id)
+        choices = [Role.MALICIOUS, Role.BENIGN]
+        probabilities = [malicious_probability, 1-malicious_probability]
+        role = rng.choices(choices, weights=probabilities, k=1)[0]
+        attack_pattern = rng.choices(list(attack_patterns), k=1)[0]
+    else:
+        role = Role.BENIGN
+        attack_pattern = ''
+    return role, attack_pattern
 
 def client_fn(context: Context):
     hf_dataset = context.run_config["dataset"]
@@ -129,7 +139,10 @@ def client_fn(context: Context):
     dirichlet_alpha = context.run_config["dirichlet-alpha"]
     malicious_probability = context.run_config["malicious-probability"]
     attack_patterns = context.run_config["attack-patterns"]
-    attack_patterns = attack_patterns.split(",")
+    attack_patterns = set(attack_patterns.split(","))
+    possible_attack_patterns = {"update-scaling", "label-flipping", "random-update", "adaptive-attack"}
+    if len(possible_attack_patterns - attack_patterns) == 4:
+        attack_patterns = []
     update_scaling_factor = context.run_config["update-scaling-factor"]
 
     # Load model and data
@@ -137,16 +150,18 @@ def client_fn(context: Context):
     net = load_model(dataset)
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
+    no_defense_fedavg = context.run_config["no-defense-fedavg"]
 
     trainloader, valloader = load_data(partition_id, num_partitions, hf_dataset, total_max_samples=total_max_samples,
                                        non_iid=non_iid, dirichlet_alpha=dirichlet_alpha)
     local_epochs = context.run_config["local-epochs"]
 
     role, attack_pattern = get_role(partition_id, malicious_probability, attack_patterns)
+
     # Return Client instance
     return FlowerClient(net, trainloader, valloader, local_epochs, dataset, cid=partition_id,
                         role=role, attack_pattern=attack_pattern, existing_attack_patterns=attack_patterns,
-                        update_scaling_factor=update_scaling_factor).to_client()
+                        update_scaling_factor=update_scaling_factor, no_defense_fedavg=no_defense_fedavg).to_client()
 
 
 # Flower ClientApp

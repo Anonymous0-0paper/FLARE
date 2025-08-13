@@ -63,22 +63,22 @@ def soft_target_inclusion_rate_metric(target_clients: dict[str, ClientReputation
     return (partial_inclusion + full_inclusion) / num_benign_clients
 
 def get_precision(labels_over_epochs: list[list[int]], y_pred_over_epochs: list[list[int]]) -> list[float]:
-    return [sk.metrics.precision_score(y_true=labels, y_pred=y_pred, average=None)
+    return [sk.metrics.precision_score(y_true=labels, y_pred=y_pred, average=None, zero_division=0)
             for y_pred, labels in zip(y_pred_over_epochs, labels_over_epochs)]
 
 
 def get_recall(labels_over_epochs: list[list[int]], y_pred_over_epochs: list[list[int]]) -> list[float]:
-    return [sk.metrics.recall_score(y_true=labels, y_pred=y_pred, average=None)
+    return [sk.metrics.recall_score(y_true=labels, y_pred=y_pred, average=None, zero_division=0)
             for y_pred, labels in zip(y_pred_over_epochs, labels_over_epochs)]
 
 
 def get_f1score(labels_over_epochs: list[list[int]], y_pred_over_epochs: list[list[int]]) -> list[float]:
-    return [sk.metrics.f1_score(y_true=labels, y_pred=y_pred, average=None)
+    return [sk.metrics.f1_score(y_true=labels, y_pred=y_pred, average=None, zero_division=0)
             for y_pred, labels in zip(y_pred_over_epochs, labels_over_epochs)]
 
 
 def get_accuracy_score(labels_over_epochs: list[list[int]], y_pred_over_epochs: list[list[int]]) -> list[float]:
-    return [sk.metrics.accuracy_score(y_true=labels, y_pred=y_pred, normalize=True)
+    return [sk.metrics.accuracy_score(y_true=labels, y_pred=y_pred, normalize=True, zero_division=0)
             for y_pred, labels in zip(y_pred_over_epochs, labels_over_epochs)]
 
 def calc_avg(results: dict[str, list[float]]) -> dict[str, float]:
