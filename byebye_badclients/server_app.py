@@ -158,7 +158,7 @@ def get_evaluate_metrics_aggregation_fn(context: Context):
 class WeightedFedAvg(FedAvg):
     def __init__(self, server_rounds, fit_metrics_aggregation_fn: Optional[MetricsAggregationFn] = None,
                  base_reliability_threshold=0.5, alpha=0.7, beta=0.6, anomaly_threshold=5.99, penalty_severity=5,
-                 gamma=0.3, delta=0.4, recovery=0.05, decay=0.15, **kwargs):
+                 gamma=0.3, delta=0.4, recovery=0.05, decay=0.15, w1=0.3, w2=0.4, w3=0.3, late_training_threshold=0.6, **kwargs):
         super().__init__(**kwargs)
         self.server_rounds = server_rounds
         self.fit_metrics_aggregation_fn = fit_metrics_aggregation_fn
@@ -168,7 +168,7 @@ class WeightedFedAvg(FedAvg):
         self.anomaly_rate = None
         self.conv = 0
         self.last_two_updates = (None, None)
-        self.reputation_weights = (0.3, 0.3, 0.3)
+        self.reputation_weights = (w1, w2, w3)
         self.reliability_threshold = base_reliability_threshold
         # Hyperparameters
         self.base_reliability_threshold = base_reliability_threshold
@@ -180,19 +180,34 @@ class WeightedFedAvg(FedAvg):
         self.delta = delta
         self.recovery = recovery
         self.decay = decay
-        # Metrics
-        self.robustness_score = {}
-        self.num_trusted_clients = {}
-        self.num_untrusted_clients = {}
-        self.num_suspicious_clients = {}
-        self.soft_malicious_exclusion_rate = {}
-        self.hard_malicious_exclusion_rate = {}
-        self.soft_malicious_inclusion_rate = {}
-        self.hard_malicious_inclusion_rate = {}
-        self.soft_benign_inclusion_rate = {}
-        self.hard_benign_inclusion_rate = {}
-        self.soft_benign_exclusion_rate = {}
-        self.hard_benign_exclusion_rate = {}
+        self.late_training_threshold = late_training_threshold
+        # Metrics Round-scope
+        self.robustness_score_round = {}
+        self.num_trusted_clients_round = {}
+        self.num_untrusted_clients_round = {}
+        self.num_suspicious_clients_round = {}
+        self.soft_malicious_exclusion_rate_round = {}
+        self.hard_malicious_exclusion_rate_round = {}
+        self.soft_malicious_inclusion_rate_round = {}
+        self.hard_malicious_inclusion_rate_round = {}
+        self.soft_benign_inclusion_rate_round = {}
+        self.hard_benign_inclusion_rate_round = {}
+        self.soft_benign_exclusion_rate_round = {}
+        self.hard_benign_exclusion_rate_round = {}
+        # Metrics Global-scope
+        self.robustness_score_global = {}
+        self.num_trusted_clients_global = {}
+        self.num_untrusted_clients_global = {}
+        self.num_suspicious_clients_global = {}
+        self.soft_malicious_exclusion_rate_global = {}
+        self.hard_malicious_exclusion_rate_global = {}
+        self.soft_malicious_inclusion_rate_global = {}
+        self.hard_malicious_inclusion_rate_global = {}
+        self.soft_benign_inclusion_rate_global = {}
+        self.hard_benign_inclusion_rate_global = {}
+        self.soft_benign_exclusion_rate_global = {}
+        self.hard_benign_exclusion_rate_global = {}
+
     def aggregate_fit(self, server_round, results, failures):
         now = time.time()
 
@@ -202,9 +217,12 @@ class WeightedFedAvg(FedAvg):
         if not self.accept_failures and failures:
             return None, {}
 
-        self.num_trusted_clients[server_round] = 0
-        self.num_untrusted_clients[server_round] = 0
-        self.num_suspicious_clients[server_round] = 0
+        self.num_trusted_clients_round[server_round] = 0
+        self.num_untrusted_clients_round[server_round] = 0
+        self.num_suspicious_clients_round[server_round] = 0
+        self.num_trusted_clients_global[server_round] = 0
+        self.num_untrusted_clients_global[server_round] = 0
+        self.num_suspicious_clients_global[server_round] = 0
 
         # Client Registration
         updates = {}
@@ -234,7 +252,6 @@ class WeightedFedAvg(FedAvg):
 
             lw = LedoitWolf()
             lw.fit(others_reduced_update_matrix)
-            cov = lw.covariance_
             inv_covariance = lw.precision_
 
             client_idx = cids.index(client.cid)
@@ -246,14 +263,24 @@ class WeightedFedAvg(FedAvg):
                                                    anomaly_threshold=self.anomaly_threshold,
                                                    penalty_severity=self.penalty_severity)
             if self.clients[client.cid].classification == Classification.TRUSTED:
-                self.num_trusted_clients[server_round] += 1
+                self.num_trusted_clients_round[server_round] += 1
             elif self.clients[client.cid].classification == Classification.SUSPICIOUS:
-                self.num_suspicious_clients[server_round] += 1
+                self.num_suspicious_clients_round[server_round] += 1
             else:
-                self.num_untrusted_clients[server_round] += 1
+                self.num_untrusted_clients_round[server_round] += 1
                 anomaly_count += 1
+
             print("------------------------------------------------" + "\n"
                   "------------------------------------------------")
+
+        for cid, client in self.clients.items():
+            if client.classification == Classification.TRUSTED:
+                self.num_trusted_clients_global[server_round] += 1
+            elif client.classification == Classification.SUSPICIOUS:
+                self.num_suspicious_clients_global[server_round] += 1
+            else:
+                self.num_untrusted_clients_global[server_round] += 1
+
         # Success Rate related Metrics
         client_ids = list(updates.keys())
         self.handle_robustness_metrics(server_round, client_ids)
@@ -270,6 +297,10 @@ class WeightedFedAvg(FedAvg):
         # update reliability_threshold based on conv and anomaly rate
         self.reliability_threshold = self.base_reliability_threshold + self.gamma * self.conv - self.delta * self.anomaly_rate
         print("Updated Reliability Threshold: ", self.reliability_threshold)
+
+       # Dynamic adjustment of reputation mixing coefficients
+        self.dynamic_reputation_weight_computation()
+
         # Gradient Clipping
         norms = np.array([np.linalg.norm(update) for update in updates.values()])
         c = np.median(norms)
@@ -306,94 +337,233 @@ class WeightedFedAvg(FedAvg):
 
         return ndarrays_to_parameters(new_params) , metrics_aggregated
 
+    def dynamic_reputation_weight_computation(self):
+
+        all_reps = []
+        trusted_reps = []
+        untrusted_reps = []
+
+        # Single pass to build all necessary lists
+        for _, client in self.clients.items():
+            scores = (client.performance_consistency_score, client.statistical_anomaly_score,
+                      client.temporal_behavior_score)
+            all_reps.append(scores)
+            if client.classification == Classification.UNTRUSTED:
+                untrusted_reps.append(scores)
+            else:
+                trusted_reps.append(scores)
+
+        rep_var = np.var(all_reps, axis=0)
+
+        mean_sus = np.mean(untrusted_reps, axis=0) if untrusted_reps else np.zeros(3)
+        mean_trusted = np.mean(trusted_reps, axis=0) if trusted_reps else np.zeros(3)
+
+        sep = np.abs(mean_trusted - mean_sus)
+
+        priorities = sep * rep_var
+
+        if self.conv > self.late_training_threshold:
+            priorities[0] *= 1.5
+            priorities[2] *= 1.2
+        else:
+            priorities[1] *= 1.3
+            priorities[0] *= 0.8
+
+        attack_pattern = self.analyze_pattern(rep_var)
+
+        if attack_pattern == 'update-manipulation': # includes 'update-scaling', 'random-update'
+            priorities[1] *= 2.0
+        elif attack_pattern == 'adaptive-attack':
+            priorities[2] *= 2.0
+        else:
+            priorities[0] *= 1.8
+
+        exp_priorities = np.exp(priorities)
+        weights = exp_priorities / np.sum(exp_priorities)
+
+        self.reputation_weights = 0.7 * weights + 0.3 * np.array(self.reputation_weights)
+        print(f"Reputation Weights: {self.reputation_weights}")
+    def analyze_pattern(self, rep_var):
+        highest_variance_score = np.argmax(rep_var)
+        if highest_variance_score == 0:
+            return 'label-flipping'
+        elif highest_variance_score == 1:
+            return 'update-manipulation'
+        else:
+            return 'adaptive-attack'
+
     def handle_robustness_metrics(self, server_round, client_ids):
         # Calculate Robustness Score
-        self.robustness_score[server_round] = robustness_metric(
+        self.robustness_score_round[server_round] = robustness_metric(
             {cid: client for cid, client in self.clients.items() if client.cid in client_ids}, self.reliability_threshold)
 
         # Calculate Soft Malicious Exclusion Rate (including Suspicious ones partially)
         malicious_clients = {cid: client for cid, client in self.clients.items() if
                              client.cid in client_ids and client.role == str(Role.MALICIOUS)}
-        self.soft_malicious_exclusion_rate[server_round] = soft_target_exclusion_rate_metric(malicious_clients, self.reliability_threshold)
+        self.soft_malicious_exclusion_rate_round[server_round] = soft_target_exclusion_rate_metric(malicious_clients, self.reliability_threshold)
 
         len_malicious_clients = len(malicious_clients)
 
         # Calculate Hard Malicious Exclusion Rate
         num_untrusted_malicious_clients = len(
             {client for _, client in malicious_clients.items() if client.classification == Classification.UNTRUSTED})
-        self.hard_malicious_exclusion_rate[server_round] = hard_rate_metric(len_malicious_clients,
+        self.hard_malicious_exclusion_rate_round[server_round] = hard_rate_metric(len_malicious_clients,
                                                                         num_untrusted_malicious_clients)
 
         # Calculate Hard Malicious Inclusion Rate
         num_trusted_malicious_clients = len(
             {client for _, client in malicious_clients.items() if client.classification == Classification.TRUSTED})
-        self.hard_malicious_inclusion_rate[server_round] = hard_rate_metric(len_malicious_clients, num_trusted_malicious_clients)
+        self.hard_malicious_inclusion_rate_round[server_round] = hard_rate_metric(len_malicious_clients, num_trusted_malicious_clients)
 
         # Calculate Soft Malicious Inclusion Rate
-        self.soft_malicious_inclusion_rate[server_round] = soft_target_inclusion_rate_metric(malicious_clients, self.reliability_threshold)
+        self.soft_malicious_inclusion_rate_round[server_round] = soft_target_inclusion_rate_metric(malicious_clients, self.reliability_threshold)
 
         # Calculate Soft Benign Inclusion Rate (including Suspicious ones partially)
         benign_clients = {cid: client for cid, client in self.clients.items() if
                           client.cid in client_ids and client.role == str(Role.BENIGN)}
-        self.soft_benign_inclusion_rate[server_round] = soft_target_inclusion_rate_metric(benign_clients,
+        self.soft_benign_inclusion_rate_round[server_round] = soft_target_inclusion_rate_metric(benign_clients,
                                                                                           self.reliability_threshold)
         len_benign_clients = len(benign_clients)
         # Calculate Hard Benign Inclusion Rate
         num_trusted_benign_clients = len(
             {client for _, client in benign_clients.items() if client.classification == Classification.TRUSTED})
-        self.hard_benign_inclusion_rate[server_round] = hard_rate_metric(len_benign_clients, num_trusted_benign_clients)
+        self.hard_benign_inclusion_rate_round[server_round] = hard_rate_metric(len_benign_clients, num_trusted_benign_clients)
 
         # Calculate Soft Benign Inclusion Rate (including Suspicious ones partially)
-        self.soft_benign_exclusion_rate[server_round] = soft_target_exclusion_rate_metric(benign_clients, self.reliability_threshold)
+        self.soft_benign_exclusion_rate_round[server_round] = soft_target_exclusion_rate_metric(benign_clients, self.reliability_threshold)
 
         # Calculate Hard Benign Exclusion Rate
         num_untrusted_benign_clients = len(
             {client for _, client in benign_clients.items() if client.classification == Classification.UNTRUSTED}
         )
-        self.hard_benign_exclusion_rate[server_round] = hard_rate_metric(len_benign_clients, num_untrusted_benign_clients)
+        self.hard_benign_exclusion_rate_round[server_round] = hard_rate_metric(len_benign_clients, num_untrusted_benign_clients)
+
+        # Calculate Global Robustness Score
+        self.robustness_score_global[server_round] = robustness_metric(clients=self.clients, reliability_threshold=self.reliability_threshold)
+
+        # Calculate Global Soft Malicious Exclusion Rate (including Suspicious ones partially)
+        global_malicious_clients = {cid: client for cid, client in self.clients.items() if client.role == str(Role.MALICIOUS)}
+        self.soft_malicious_exclusion_rate_global[server_round] = soft_target_exclusion_rate_metric(global_malicious_clients, self.reliability_threshold)
+
+        # Calculate Global Hard Malicious Exclusion Rate
+        len_global_malicious_clients = len(global_malicious_clients)
+        self.hard_malicious_exclusion_rate_global[server_round] = hard_rate_metric(len_global_malicious_clients,
+            len([client for _, client in global_malicious_clients.items() if client.classification == Classification.UNTRUSTED]))
+
+        # Calculate Global Hard Malicious Inclusion Rate
+        self.hard_malicious_inclusion_rate_global[server_round] = hard_rate_metric(len_global_malicious_clients,
+            len([client for _, client in global_malicious_clients.items() if client.classification == Classification.TRUSTED]))
+
+        # Calculate Global Soft Malicious Inclusion Rate (including Suspicious ones partially)
+        self.soft_malicious_inclusion_rate_global[server_round] = soft_target_inclusion_rate_metric(global_malicious_clients, self.reliability_threshold)
+
+        # Calculate Global Soft Benign Inclusion Rate (including Suspicious ones partially)
+        global_benign_clients = {cid: client for cid, client in self.clients.items() if client.role == str(Role.BENIGN)}
+        self.soft_benign_inclusion_rate_global[server_round] = soft_target_inclusion_rate_metric(global_benign_clients, self.reliability_threshold)
+
+        # Calculate Global Hard Benign Inclusion Rate
+        len_global_benign_clients = len(global_benign_clients)
+        self.hard_benign_inclusion_rate_global[server_round] = hard_rate_metric(len_global_benign_clients,
+            len([client for _, client in global_benign_clients.items() if client.classification == Classification.TRUSTED]))
+
+        # Calculate Global Soft Benign Exclusion Rate (including Suspicious ones partially)
+        self.soft_benign_exclusion_rate_global[server_round] = soft_target_exclusion_rate_metric(global_benign_clients, self.reliability_threshold)
+
+        # Calculate Global Hard Benign Exclusion Rate
+        self.hard_benign_exclusion_rate_global[server_round] = hard_rate_metric(len_global_benign_clients,
+            len([client for _, client in global_benign_clients.items() if client.classification == Classification.UNTRUSTED]))
 
         if server_round == self.server_rounds:
             self.robustness_metrics_to_csvs()
 
     def robustness_metrics_to_csvs(self):
-        base_path = os.path.abspath(f"plots/robustness/")
+        # Round
+        base_path = os.path.abspath(f"plots/robustness/per_round/")
         os.makedirs(base_path, exist_ok=True)
 
         filepath = os.path.join(base_path, "robustness_score.csv")
-        dict_to_csv(d=self.robustness_score, filepath=filepath, column_name="robustness_score")
+        dict_to_csv(d=self.robustness_score_round, filepath=filepath, column_name="robustness_score_per_round")
 
         filepath = os.path.join(base_path, "hard_malicious_detection_rate.csv")
-        dict_to_csv(d=self.hard_malicious_exclusion_rate, filepath=filepath, column_name="hard_malicious_detection_rate")
+        dict_to_csv(d=self.hard_malicious_exclusion_rate_round, filepath=filepath, column_name="hard_malicious_detection_rate_per_round")
 
         filepath = os.path.join(base_path, "soft_malicious_detection_rate.csv")
-        dict_to_csv(d=self.soft_malicious_exclusion_rate, filepath=filepath, column_name="soft_malicious_detection_rate")
+        dict_to_csv(d=self.soft_malicious_exclusion_rate_round, filepath=filepath, column_name="soft_malicious_detection_rate_per_round")
 
         filepath = os.path.join(base_path, "soft_malicious_inclusion_rate.csv")
-        dict_to_csv(d=self.soft_malicious_inclusion_rate, filepath=filepath, column_name="soft_malicious_inclusion_rate")
+        dict_to_csv(d=self.soft_malicious_inclusion_rate_round, filepath=filepath, column_name="soft_malicious_inclusion_rate_per_round")
 
         filepath = os.path.join(base_path, "hard_malicious_inclusion_rate.csv")
-        dict_to_csv(d=self.hard_malicious_inclusion_rate, filepath=filepath, column_name="hard_malicious_inclusion_rate")
+        dict_to_csv(d=self.hard_malicious_inclusion_rate_round, filepath=filepath, column_name="hard_malicious_inclusion_rate_per_round")
 
         filepath = os.path.join(base_path, "hard_benign_inclusion_rate.csv")
-        dict_to_csv(d=self.hard_benign_inclusion_rate, filepath=filepath, column_name="hard_benign_inclusion_rate")
+        dict_to_csv(d=self.hard_benign_inclusion_rate_round, filepath=filepath, column_name="hard_benign_inclusion_rate_per_round")
 
         filepath = os.path.join(base_path, "soft_benign_inclusion_rate.csv")
-        dict_to_csv(d=self.soft_benign_inclusion_rate, filepath=filepath, column_name="soft_benign_inclusion_rate")
+        dict_to_csv(d=self.soft_benign_inclusion_rate_round, filepath=filepath, column_name="soft_benign_inclusion_rate_per_round")
 
         filepath = os.path.join(base_path, "soft_benign_exclusion_rate.csv")
-        dict_to_csv(d=self.soft_benign_exclusion_rate, filepath=filepath, column_name="soft_benign_exclusion_rate")
+        dict_to_csv(d=self.soft_benign_exclusion_rate_round, filepath=filepath, column_name="soft_benign_exclusion_rate_per_round")
 
         filepath = os.path.join(base_path, "hard_benign_exclusion_rate.csv")
-        dict_to_csv(d=self.hard_benign_exclusion_rate, filepath=filepath, column_name="hard_benign_exclusion_rate")
+        dict_to_csv(d=self.hard_benign_exclusion_rate_round, filepath=filepath, column_name="hard_benign_exclusion_rate_per_round")
 
         filepath = os.path.join(base_path, "num_untrusted_clients.csv")
-        dict_to_csv(d=self.num_untrusted_clients, filepath=filepath, column_name="num_untrusted_clients")
+        dict_to_csv(d=self.num_untrusted_clients_round, filepath=filepath, column_name="num_untrusted_clients_per_round")
 
         filepath = os.path.join(base_path, "num_trusted_clients.csv")
-        dict_to_csv(d=self.num_trusted_clients, filepath=filepath, column_name="num_trusted_clients")
+        dict_to_csv(d=self.num_trusted_clients_round, filepath=filepath, column_name="num_trusted_clients_per_round")
 
         filepath = os.path.join(base_path, "num_suspicious_clients.csv")
-        dict_to_csv(d=self.num_suspicious_clients, filepath=filepath, column_name="num_suspicious_clients")
+        dict_to_csv(d=self.num_suspicious_clients_round, filepath=filepath, column_name="num_suspicious_clients_per_round")
+
+        # Global
+        base_path = os.path.abspath(f"plots/robustness/overall/")
+        os.makedirs(base_path, exist_ok=True)
+
+        filepath = os.path.join(base_path, "robustness_score.csv")
+        dict_to_csv(d=self.robustness_score_global, filepath=filepath, column_name="robustness_score_overall")
+
+        filepath = os.path.join(base_path, "hard_malicious_detection_rate.csv")
+        dict_to_csv(d=self.hard_malicious_exclusion_rate_global, filepath=filepath,
+                    column_name="hard_malicious_detection_rate_overall")
+
+        filepath = os.path.join(base_path, "soft_malicious_detection_rate.csv")
+        dict_to_csv(d=self.soft_malicious_exclusion_rate_global, filepath=filepath,
+                    column_name="soft_malicious_detection_rate_overall")
+
+        filepath = os.path.join(base_path, "soft_malicious_inclusion_rate.csv")
+        dict_to_csv(d=self.soft_malicious_inclusion_rate_global, filepath=filepath,
+                    column_name="soft_malicious_inclusion_rate_overall")
+
+        filepath = os.path.join(base_path, "hard_malicious_inclusion_rate.csv")
+        dict_to_csv(d=self.hard_malicious_inclusion_rate_global, filepath=filepath,
+                    column_name="hard_malicious_inclusion_rate_overall")
+
+        filepath = os.path.join(base_path, "hard_benign_inclusion_rate.csv")
+        dict_to_csv(d=self.hard_benign_inclusion_rate_global, filepath=filepath,
+                    column_name="hard_benign_inclusion_rate_overall")
+
+        filepath = os.path.join(base_path, "soft_benign_inclusion_rate.csv")
+        dict_to_csv(d=self.soft_benign_inclusion_rate_global, filepath=filepath,
+                    column_name="soft_benign_inclusion_rate_overall")
+
+        filepath = os.path.join(base_path, "soft_benign_exclusion_rate.csv")
+        dict_to_csv(d=self.soft_benign_exclusion_rate_global, filepath=filepath,
+                    column_name="soft_benign_exclusion_rate_overall")
+
+        filepath = os.path.join(base_path, "hard_benign_exclusion_rate.csv")
+        dict_to_csv(d=self.hard_benign_exclusion_rate_global, filepath=filepath,
+                    column_name="hard_benign_exclusion_rate_overall")
+
+        filepath = os.path.join(base_path, "num_untrusted_clients.csv")
+        dict_to_csv(d=self.num_untrusted_clients_global, filepath=filepath, column_name="num_untrusted_clients_overall")
+
+        filepath = os.path.join(base_path, "num_trusted_clients.csv")
+        dict_to_csv(d=self.num_trusted_clients_global, filepath=filepath, column_name="num_trusted_clients_overall")
+
+        filepath = os.path.join(base_path, "num_suspicious_clients.csv")
+        dict_to_csv(d=self.num_suspicious_clients_global, filepath=filepath, column_name="num_suspicious_clients_overall")
 
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager
@@ -448,7 +618,7 @@ def server_fn(context: Context):
     delta = context.run_config["delta"]
     recovery = context.run_config["recovery"]
     decay = context.run_config["decay"]
-
+    late_training_threshold = context.run_config["late-training-threshold"]
     # Initialize model parameters
     dataset = hf_dataset.split('/')[-1]
     net = load_model(dataset)
@@ -470,6 +640,7 @@ def server_fn(context: Context):
             alpha=alpha, beta=beta, anomaly_threshold=anomaly_threshold,
             penalty_severity=penalty_severity,
             gamma=gamma, delta=delta, recovery=recovery, decay=decay,
+            late_training_threshold=late_training_threshold,
             fraction_fit=fraction_fit,
             fraction_evaluate=1.0,
             min_available_clients=2,

@@ -24,7 +24,8 @@ def robustness_metric(clients: dict[str, ClientReputation], reliability_threshol
                 score -= 1
             else:
                 score += client.reputation_score/reliability_threshold
-    return score
+    len_clients = len(clients)
+    return (score + len_clients) / (2 * len_clients)
 
 def hard_rate_metric(num_targets, num_found):
     if num_targets == 0:

@@ -6,11 +6,20 @@ import torch
 
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context
+from sklearn.exceptions import UndefinedMetricWarning
+
 from byebye_badclients.task import load_data, set_weights, test, train, get_update, get_weights
 from sklearn import metrics
 from enum import Enum
 
 from byebye_badclients.util import load_model
+
+import warnings
+# Ignore deprecation warnings from datasets/dill
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Completely ignore sklearn undefined metric warnings
+warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
 
 def get_class_distribution(dataloader):
     def add_label(counts, lbl):
