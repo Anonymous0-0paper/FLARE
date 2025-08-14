@@ -24,6 +24,7 @@ class ClientReputation:
         self.role = role
         self.round_tracker = 0
         self.participations = 0
+        self.update_inclusions = 0
         self.participation_rate = None
         self.estimated_round_trip_times = []
         self.attack_pattern = attack_pattern
@@ -116,8 +117,10 @@ class ClientReputation:
     def update_classification(self, reliability_threshold):
         if self.reputation_score >= reliability_threshold:
             self.classification = Classification.TRUSTED
+            self.update_inclusions += 1
         elif self.reputation_score < reliability_threshold / 2.0:
             self.classification = Classification.UNTRUSTED
         else:
             self.classification = Classification.SUSPICIOUS
+            self.update_inclusions += self.reputation_score / reliability_threshold
         return self.classification

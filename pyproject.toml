@@ -43,7 +43,7 @@ total-max-samples = -1
 non-iid = true
 dirichlet-alpha = 0.3 # if non-iid == true
 malicious-probability = 0.3
-attack-patterns = 'update-scaling' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack'] and separate by comma
+attack-patterns = 'random-update' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack'] and separate by comma
 update-scaling-factor = 2
 base-reliability-threshold = 0.5
 alpha = 0.7

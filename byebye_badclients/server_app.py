@@ -155,6 +155,17 @@ def get_evaluate_metrics_aggregation_fn(context: Context):
         return ret_dict
     return evaluate_metrics_aggregation_fn
 
+
+def analyze_pattern(rep_var):
+    highest_variance_score = np.argmax(rep_var)
+    if highest_variance_score == 0:
+        return 'label-flipping'
+    elif highest_variance_score == 1:
+        return 'update-manipulation'
+    else:
+        return 'adaptive-attack'
+
+
 class WeightedFedAvg(FedAvg):
     def __init__(self, server_rounds, fit_metrics_aggregation_fn: Optional[MetricsAggregationFn] = None,
                  base_reliability_threshold=0.5, alpha=0.7, beta=0.6, anomaly_threshold=5.99, penalty_severity=5,
@@ -310,7 +321,16 @@ class WeightedFedAvg(FedAvg):
             updates[cid] = update * scale
 
         # Aggregation
-        trusted_suspicious_clients = [self.clients[client.cid] for client, _ in results if self.clients[client.cid].classification != Classification.UNTRUSTED]
+        trusted_suspicious_clients = []
+        for client, fit_res in results:
+            if self.clients[client.cid].classification != Classification.UNTRUSTED:
+                trusted_suspicious_clients.append(self.clients[client.cid])
+                if self.clients[client.cid].classification == Classification.SUSPICIOUS:
+                    ndarrays = parameters_to_ndarrays(fit_res.parameters)
+                    factor = self.clients[client.cid].reputation_score * self.reliability_threshold
+                    ndarrays = [arr * factor for arr in ndarrays]
+                    fit_res.parameters = ndarrays_to_parameters(ndarrays)
+
         if trusted_suspicious_clients:
             aggregated_params = np.sum([client.reputation_score * client.num_examples * updates[client.cid] for client in trusted_suspicious_clients], axis=0)
             aggregated_params /= np.sum([client.reputation_score * client.num_examples for client in trusted_suspicious_clients])
@@ -369,7 +389,7 @@ class WeightedFedAvg(FedAvg):
             priorities[1] *= 1.3
             priorities[0] *= 0.8
 
-        attack_pattern = self.analyze_pattern(rep_var)
+        attack_pattern = analyze_pattern(rep_var)
 
         if attack_pattern == 'update-manipulation': # includes 'update-scaling', 'random-update'
             priorities[1] *= 2.0
@@ -383,14 +403,6 @@ class WeightedFedAvg(FedAvg):
 
         self.reputation_weights = 0.7 * weights + 0.3 * np.array(self.reputation_weights)
         print(f"Reputation Weights: {self.reputation_weights}")
-    def analyze_pattern(self, rep_var):
-        highest_variance_score = np.argmax(rep_var)
-        if highest_variance_score == 0:
-            return 'label-flipping'
-        elif highest_variance_score == 1:
-            return 'update-manipulation'
-        else:
-            return 'adaptive-attack'
 
     def handle_robustness_metrics(self, server_round, client_ids):
         # Calculate Robustness Score
