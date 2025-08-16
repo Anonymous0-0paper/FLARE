@@ -1,4 +1,5 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
+import json
 import os
 import time
 from typing import Optional
@@ -33,7 +34,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
 
 def process_evaluate_results(results: dict[str, list[float]]):
-    base_path = os.path.abspath(f"plots/performance/")
+    base_path = os.path.abspath(f"results/performance/")
     os.makedirs(base_path, exist_ok=True)
 
     '''Model Performance Results'''
@@ -77,7 +78,7 @@ def collect_evaluate_results(metrics_dict: dict[str, float], context: Context):
         process_evaluate_results(results=evaluate_results)
 
 def process_fit_results(results: dict[str, list[float]]):
-    base_path = os.path.abspath(f"plots/performance")
+    base_path = os.path.abspath(f"results/performance")
     os.makedirs(base_path, exist_ok=True)
 
     '''Global Results'''
@@ -250,7 +251,7 @@ class WeightedFedAvg(FedAvg):
         # Update Scores
 
         anomaly_count = 0
-        pca = PCA(n_components=8)
+        pca = PCA(n_components=max(len(results) - 2, 1))
         cids = list(updates.keys())
         update_matrix = np.stack([updates[cid] for cid in cids])
         reduced_update_matrix = pca.fit_transform(update_matrix)
@@ -281,7 +282,8 @@ class WeightedFedAvg(FedAvg):
                 self.num_untrusted_clients_round[server_round] += 1
                 anomaly_count += 1
 
-            print("------------------------------------------------" + "\n"
+            print("------------------------------------------------\n" +
+                  "\n" +
                   "------------------------------------------------")
 
         for cid, client in self.clients.items():
@@ -490,7 +492,7 @@ class WeightedFedAvg(FedAvg):
 
     def robustness_metrics_to_csvs(self):
         # Round
-        base_path = os.path.abspath(f"plots/robustness/per_round/")
+        base_path = os.path.abspath(f"results/robustness/per_round/")
         os.makedirs(base_path, exist_ok=True)
 
         filepath = os.path.join(base_path, "robustness_score.csv")
@@ -530,7 +532,7 @@ class WeightedFedAvg(FedAvg):
         dict_to_csv(d=self.num_suspicious_clients_round, filepath=filepath, column_name="num_suspicious_clients_per_round")
 
         # Global
-        base_path = os.path.abspath(f"plots/robustness/overall/")
+        base_path = os.path.abspath(f"results/robustness/overall/")
         os.makedirs(base_path, exist_ok=True)
 
         filepath = os.path.join(base_path, "robustness_score.csv")
@@ -616,6 +618,13 @@ class WeightedFedAvg(FedAvg):
         return [(client, fit_ins) for client in sampled_clients]
 
 def server_fn(context: Context):
+    base_path = os.path.abspath(f"results/")
+    os.makedirs(base_path, exist_ok=True)
+
+    hyperparameters_path = os.path.join(base_path, "config.json")
+    with open(hyperparameters_path, "w") as f:
+        json.dump(context.run_config, f, indent=2)
+
     # Read from config
     no_defense_fedavg = context.run_config["no-defense-fedavg"]
     num_rounds = context.run_config["num-server-rounds"]
@@ -631,6 +640,7 @@ def server_fn(context: Context):
     recovery = context.run_config["recovery"]
     decay = context.run_config["decay"]
     late_training_threshold = context.run_config["late-training-threshold"]
+
     # Initialize model parameters
     dataset = hf_dataset.split('/')[-1]
     net = load_model(dataset)

@@ -95,7 +95,9 @@ class ClientReputation:
             self.statistical_anomaly_score = np.exp(-penalty_severity * (distance - anomaly_threshold))
 
     def update_temporal_behaviour_score(self, beta, response_time_variance):
-        self.temporal_behavior_score = beta * self.participation_rate + (1.0 - beta) * 1.0 / (1.0 + response_time_variance)
+        update_inclusion_rate = self.update_inclusions / self.participations
+        self.temporal_behavior_score = beta * update_inclusion_rate + (1 - beta) * (1.0 / (1.0 + response_time_variance))
+        # self.temporal_behavior_score = beta * self.participation_rate + (1.0 - beta) * 1.0 / (1.0 + response_time_variance)
         return self.temporal_behavior_score
 
     def update_reputation_score(self, reputation_weights):
