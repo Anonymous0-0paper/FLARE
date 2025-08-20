@@ -1,0 +1,5 @@
+**/results/
+**/saved_results/
+**/data/
+.venv/
+README.md
