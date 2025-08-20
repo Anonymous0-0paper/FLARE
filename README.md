@@ -10,11 +10,12 @@ To run the experiments on a slurm based cluster we provided some bash scripts (f
 Use scp to get the scripts onto your cluster, where you want to run the experiments. Also copy the pyproject.toml over to the cluster as this will allow you to configure hyperparameters and scenarios.
 The scripts rely on Singularity so make sure it is available on your cluster.
 
+So first you must build the images, we used docker for this but you can write your own Singularity image as well.
+Build the docker images for the platform that you need, upload them to docker hub to be able to pull them on any machine.
+
 After that use Singularity to pull the required docker images to run our framework.
 ```bash
-singularity pull docker://leonkiss2912/byebye-badclients-serverapp:latest
-singularity pull docker://leonkiss2912/byebye-badclients-superlink:latest
-singularity pull docker://leonkiss2912/byebye-badclients-supernode:latest
+singularity pull docker://<your-image>:latest
 ```
 
 Furthermore, make sure to create a folder called `/results` as it is required by the superlink container to start and write results into.
@@ -23,7 +24,7 @@ Furthermore, make sure to create a folder called `/results` as it is required by
 
 First of all, change any host paths for volume binds in .slurm and .sh scripts to match with your host paths. Note: the host path will not be automatically created during the experiments runtime and must exist before starting any containers.
 
-For instance: ./server has this line: `echo "srun singularity run --bind /scratch/leon.kiss/byebye-badclients/results:/home/leon.kiss/results` your host will (probably) not have a path like /scratch/leon.kiss/... so change these to match your environment. The paths on the righthand-side must remain untouched.
+For instance: ./superlink.sh has a line to bind result paths from host and container. Change these paths to your needs. You might have to check out what path results are written to in your superlink container as this depends on what program you use to run images.
 
 To prepare the experiment setting you need to get Flowers Infrastructure running.
 We provide the script `superlink.sh` to start Flowers Superlink. Output will be written to `./superlink.out`. Check this file as it prints the superlinks IP adress, which is required for the next step.
