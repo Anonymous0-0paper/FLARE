@@ -28,7 +28,7 @@ dependencies = [
 packages = ["."]
 
 [tool.flwr.app]
-publisher = "leonkiss2912"
+publisher = "anonymous"
 
 # Point to your ServerApp and ClientApp objects
 # Format: "<module>:<object>"

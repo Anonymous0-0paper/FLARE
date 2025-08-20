@@ -25,7 +25,7 @@ srun bash -c 'PORT=$((BASE_PORT + SLURM_PROCID))
 	echo "Task $SLURM_PROCID starting on $(hostname) with port $PORT"
 	singularity run \
 	--nv \
-	--bind /scratch/leon.kiss:/scratch \
+	--bind <HOSTPATH>:/scratch \
 	byebye-badclients-supernode_latest.sif \
 	--insecure \
 	--superlink $IP:9092 \
