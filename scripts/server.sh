@@ -19,7 +19,7 @@ echo "" >> "$OUTPUT_FILE"
 
 echo "srun singularity exec --nv \
 	--pwd /app \
-	--bind /scratch/leon.kiss/byebye-badclients/pyproject.toml:/app/pyproject.toml \
+	--bind <HOSTPATH-TO-pyproject.toml>:/app/pyproject.toml \
 	byebye-badclients-serverapp_latest.sif \
 	flwr run . remote-federation --stream" \
 	>> "$OUTPUT_FILE"
