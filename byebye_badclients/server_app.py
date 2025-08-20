@@ -25,7 +25,7 @@ from sklearn.decomposition import PCA
 
 from byebye_badclients.util import load_model
 from sklearn.covariance import LedoitWolf
-
+from sklearn.covariance import MinCovDet
 import warnings
 # Ignore deprecation warnings from datasets/dill
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -276,24 +276,28 @@ class WeightedFedAvg(FedAvg):
         # Update Scores
 
         anomaly_count = 0
-        pca = PCA(n_components=max(len(results) - 2, 1))
+        pca = PCA(n_components=max(int(len(results)/10), 1))
         cids = list(updates.keys())
         update_matrix = np.stack([updates[cid] for cid in cids])
         reduced_update_matrix = pca.fit_transform(update_matrix)
 
+        mcd = MinCovDet(random_state=server_round)
+        mcd_matrix = mcd.fit(reduced_update_matrix)
+        mcd_mean = mcd_matrix.location_
+        mcd_inv_cov = mcd_matrix.precision_
         for client, fit_res in results:
             print(f"Behavior: {fit_res.metrics["role"]}" + (f" Attack Pattern: {self.clients[client.cid].attack_pattern}" if
                   self.clients[client.cid].role == str(Role.MALICIOUS) else ""))
-            others_reduced_update_matrix = np.delete(reduced_update_matrix, cids.index(client.cid), axis=0) if len(results) >= 2 else reduced_update_matrix
-            mean = np.mean(others_reduced_update_matrix, axis=0)
+            # others_reduced_update_matrix = np.delete(reduced_update_matrix, cids.index(client.cid), axis=0) if len(results) >= 2 else reduced_update_matrix
+            # mean = np.mean(others_reduced_update_matrix, axis=0)
 
-            lw = LedoitWolf()
-            lw.fit(others_reduced_update_matrix)
-            inv_covariance = lw.precision_
+            # lw = LedoitWolf()
+            # lw.fit(others_reduced_update_matrix)
+            # inv_covariance = lw.precision_
 
             client_idx = cids.index(client.cid)
             reduced_update_vector = reduced_update_matrix[client_idx, :]
-            self.clients[client.cid].update_scores(fit_res=fit_res, reduced_update_vector=reduced_update_vector, now=aggregation_start, mean=mean, inv_covariance=inv_covariance,
+            self.clients[client.cid].update_scores(fit_res=fit_res, reduced_update_vector=reduced_update_vector, now=aggregation_start, mean=mcd_mean, inv_covariance=mcd_inv_cov,
                                                    reliability_threshold=self.reliability_threshold,
                                                    reputation_weights=self.reputation_weights,
                                                    alpha=self.alpha, beta=self.beta,
