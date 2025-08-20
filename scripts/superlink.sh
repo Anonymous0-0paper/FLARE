@@ -17,7 +17,7 @@ echo "#SBATCH --time=12:00:00" >> "$OUTPUT_FILE"
 
 # command for task
 echo "srun hostname -i" >> "$OUTPUT_FILE"
-echo "srun singularity run --bind /scratch/leon.kiss/byebye-badclients/results:/home/leon.kiss/results \
+echo "srun singularity run --bind <HOSTPATH-TO-RESULTS>:<PATH-TO-RESULTS> \
 	byebye-badclients-superlink_latest.sif \
 	--insecure" >> "$OUTPUT_FILE"
 
