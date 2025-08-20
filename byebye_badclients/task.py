@@ -1,5 +1,5 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
-
+import os
 from collections import OrderedDict
 
 import numpy as np
@@ -7,31 +7,31 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from flwr_datasets import FederatedDataset
-from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset, random_split
 from torchvision.transforms import Compose, Normalize, ToTensor
 
-
 class Net(nn.Module):
-    """Model (simple CNN adapted from 'PyTorch: A 60 Minute Blitz')"""
-
     def __init__(self):
         super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+        self.conv1 = nn.Conv2d(3, 16, 3, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+        self.conv4 = nn.Conv2d(64, 128, 3, padding=1)
+        self.conv5 = nn.Conv2d(128, 128, 3, padding=1)
+
+        self.pool = nn.MaxPool2d(2,2)
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4,4))
+        self.fc1 = nn.Linear(128*4*4, 10)
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
+        x = F.relu(self.conv1(x))
         x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 5 * 5)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        x = F.relu(self.conv3(x))
+        x = self.pool(F.relu(self.conv4(x)))
+        x = F.relu(self.conv5(x))
+        x = self.adaptive_pool(x)
+        x = x.view(-1, 128*4*4)
+        return self.fc1(x)
 
 
 class NetMNIST(nn.Module):
@@ -46,66 +46,242 @@ class NetMNIST(nn.Module):
         x = x.view(-1, 6 * 13 * 13)
         return self.fc1(x)
 
-fds = None  # Cache FederatedDataset
+
+def create_dirichlet_partition(labels: np.ndarray, num_partitions: int, alpha: float = 0.5) -> dict:
+    """Create Dirichlet non-IID partitions based on labels."""
+    # Set seed for reproducible partitioning
+    np.random.seed(num_partitions)
+
+    num_classes = len(np.unique(labels))
+    label_distribution = np.random.dirichlet([alpha] * num_classes, num_partitions)
+
+    # Get indices for each class
+    class_indices = {}
+    for class_id in range(num_classes):
+        class_indices[class_id] = np.where(labels == class_id)[0]
+
+    partitions = {i: [] for i in range(num_partitions)}
+
+    for class_id in range(num_classes):
+        class_idx = class_indices[class_id].copy()
+        np.random.shuffle(class_idx)
+
+        # Split class indices according to Dirichlet distribution
+        splits = np.cumsum(label_distribution[:, class_id] * len(class_idx)).astype(int)
+        splits = np.concatenate([[0], splits])
+
+        for partition_id in range(num_partitions):
+            start_idx = splits[partition_id]
+            end_idx = splits[partition_id + 1]
+            partitions[partition_id].extend(class_idx[start_idx:end_idx].tolist())
+
+    for partition_id in range(num_partitions):
+        np.random.seed(partition_id)
+        np.random.shuffle(partitions[partition_id])
+
+    return partitions
 
 
-def load_data(partition_id: int, num_partitions: int, dataset: str, total_max_samples: int, non_iid: bool = False, dirichlet_alpha: float = 0.5):
-    """Load partition CIFAR10 data."""
-    dataset_name = dataset.split('/')[-1]
+def create_iid_partition(dataset_size: int, num_partitions: int) -> dict:
+    """Create IID partitions."""
+    # Set seed for reproducible partitioning
+    np.random.seed(num_partitions)
 
-    subset = None
-    if dataset_name == 'svhn':
-        subset = "cropped_digits"
+    indices = list(range(dataset_size))
+    np.random.shuffle(indices)
 
-    # Only initialize `FederatedDataset` once
-    global fds
-    if fds is None:
-        partitioner = DirichletPartitioner(num_partitions=num_partitions, partition_by='label', alpha=dirichlet_alpha) if non_iid else IidPartitioner(num_partitions=num_partitions)
-        fds = FederatedDataset(
-            dataset=dataset_name,
-            subset=subset,
-            partitioners={"train": partitioner},
+    partition_size = dataset_size // num_partitions
+    partitions = {}
+
+    for i in range(num_partitions):
+        start_idx = i * partition_size
+        if i == num_partitions - 1:  # Last partition gets remaining samples
+            end_idx = dataset_size
+        else:
+            end_idx = (i + 1) * partition_size
+        partitions[i] = indices[start_idx:end_idx]
+
+    return partitions
+
+
+class PartitionDataset:
+    """Mock FederatedDataset partition to maintain similar API."""
+
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = indices
+
+    def train_test_split(self, test_size=0.2, seed=42):
+        """Split partition into train and test, mimicking HF dataset API."""
+        dataset_size = len(self.indices)
+        test_size_actual = int(test_size * dataset_size)
+        train_size_actual = dataset_size - test_size_actual
+
+        # Use torch random split for consistency
+        train_indices, test_indices = random_split(
+            self.indices,
+            [train_size_actual, test_size_actual],
+            generator=torch.Generator().manual_seed(seed)
         )
 
-    partition = fds.load_partition(partition_id)
-    # Divide data on each node: 80% train, 20% test
-    partition_train_test = partition.train_test_split(test_size=0.2, seed=42)
+        train_subset = TransformableSubset(self.dataset, list(train_indices))
+        test_subset = TransformableSubset(self.dataset, list(test_indices))
 
-    dataset = dataset.split('/')[-1]
-    if dataset == "mnist":
-        pytorch_transforms = Compose([ToTensor(), Normalize(mean=0.5, std=0.5)])
-        img_col_name = 'image'
-
-    elif dataset == "cifar10":
-        pytorch_transforms = Compose(
-        [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-        img_col_name = 'img'
-    else:
-        pytorch_transforms = torchvision.models.ResNet18_Weights.IMAGENET1K_V1.transforms()
-        img_col_name = 'image'
+        return {
+            "train": train_subset,
+            "test": test_subset
+        }
 
 
-    def apply_transforms(batch):
-        """Apply transforms to the partition from FederatedDataset."""
-        batch[img_col_name] = [pytorch_transforms(img) for img in batch[img_col_name]]
-        return batch
+class TransformableSubset(Subset):
+    """Subset that can have transforms applied, mimicking HF dataset with_transform."""
 
-    partition_train_test = partition_train_test.with_transform(apply_transforms)
+    def __init__(self, dataset, indices):
+        super().__init__(dataset, indices)
+        self.pytorch_transforms = None
 
+    def with_transform(self, pytorch_transforms):
+        """Apply PyTorch transforms directly to images."""
+        self.pytorch_transforms = pytorch_transforms
+        return self
+
+    def __getitem__(self, idx):
+        # Get the actual dataset index
+        dataset_idx = self.indices[idx]
+
+        # Get image and label from original torchvision dataset
+        image, label = self.dataset[dataset_idx]
+
+        # Apply transforms directly to the image
+        if self.pytorch_transforms:
+            image = self.pytorch_transforms(image)
+
+        # Return as dictionary to match HF dataset format expected by your training code
+        return {"image": image, "label": label}
+
+
+class MockFederatedDataset:
+    """Mock FederatedDataset to maintain similar API structure."""
+
+    def __init__(self, dataset_name, subset, partitions, torchvision_dataset):
+        self.dataset_name = dataset_name
+        self.subset = subset
+        self.partitions = partitions
+        self.torchvision_dataset = torchvision_dataset
+
+    def load_partition(self, partition_id):
+        """Load a specific partition, mimicking FederatedDataset API."""
+        partition_indices = self.partitions[partition_id]
+        return PartitionDataset(self.torchvision_dataset, partition_indices)
+
+partitioned_datasets = {}
+def load_data(
+    partition_id: int,
+    num_partitions: int,
+    dataset: str,
+    total_max_samples: int,
+    non_iid: bool = False,
+    dirichlet_alpha: float = 0.5,
+):
+    """Load partition data using torchvision datasets (no HuggingFace)."""
+
+    dataset_name = dataset.split("/")[-1]
+
+    # Pick cache dir
+    cache_dir = os.environ.get("TORCHVISION_DATA_DIR", f"./data/")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Partition cache key
+    partition_key = f"{dataset_name}_{num_partitions}_{non_iid}_{dirichlet_alpha}"
+
+    if partition_key not in partitioned_datasets:
+        print(f"Initializing partitioned dataset for {dataset_name}...")
+
+        # Choose transforms
+        if dataset_name == "mnist":
+            transform = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
+            torchvision_dataset = torchvision.datasets.MNIST(
+                root=cache_dir, train=True, download=True, transform=transform
+            )
+        elif dataset_name == "cifar10":
+            transform = Compose(
+                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+            )
+            torchvision_dataset = torchvision.datasets.CIFAR10(
+                root=cache_dir, train=True, download=True, transform=transform
+            )
+        elif dataset_name == "cifar100":
+            transform = Compose(
+                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+            )
+            torchvision_dataset = torchvision.datasets.CIFAR100(
+                root=cache_dir, train=True, download=True, transform=transform
+            )
+        elif dataset_name == "svhn":
+            transform = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
+            torchvision_dataset = torchvision.datasets.SVHN(
+                root=cache_dir, split="train", download=True, transform=transform
+            )
+        else:
+            print(f"Warning: Unknown dataset {dataset_name}, defaulting to CIFAR10")
+            transform = Compose(
+                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+            )
+            torchvision_dataset = torchvision.datasets.CIFAR10(
+                root=cache_dir, train=True, download=True, transform=transform
+            )
+
+        # Extract labels
+        if hasattr(torchvision_dataset, "targets"):
+            labels = np.array(torchvision_dataset.targets)
+        elif hasattr(torchvision_dataset, "labels"):
+            labels = np.array(torchvision_dataset.labels)
+        else:
+            labels = np.array([lbl for _, lbl in torchvision_dataset])
+
+        # Partition indices
+        if non_iid:
+            partitions = create_dirichlet_partition(
+                labels, num_partitions, dirichlet_alpha
+            )
+        else:
+            partitions = create_iid_partition(
+                len(torchvision_dataset), num_partitions
+            )
+
+        partitioned_datasets[partition_key] = (torchvision_dataset, partitions)
+
+    torchvision_dataset, partitions = partitioned_datasets[partition_key]
+
+    # Pick this client’s partition
+    indices = partitions[partition_id]
+    partition = Subset(torchvision_dataset, indices)
+
+    # Train/test split (80/20)
+    n_total = len(partition)
+    n_test = n_total // 5
+    test_indices = indices[:n_test]
+    train_indices = indices[n_test:]
+
+    train_set = Subset(torchvision_dataset, train_indices)
+    test_set = Subset(torchvision_dataset, test_indices)
+
+    # Cap max samples if requested
     if total_max_samples != -1:
-        max_samples = min(total_max_samples, len(partition_train_test["train"]))
-        partition_train_test["train"] = torch.utils.data.Subset(partition_train_test["train"], list(range(max_samples)))
+        max_train = min(total_max_samples, len(train_set))
+        max_test = min(total_max_samples, len(test_set))
+        train_set = Subset(train_set, list(range(max_train)))
+        test_set = Subset(test_set, list(range(max_test)))
 
-        max_samples = min(max_samples, len(partition_train_test["test"]))
-        partition_train_test["test"] = torch.utils.data.Subset(partition_train_test["test"], list(range(max_samples)))
+    # DataLoaders
+    trainloader = DataLoader(train_set, batch_size=32, shuffle=True)
+    testloader = DataLoader(test_set, batch_size=32)
 
-
-    trainloader = DataLoader(partition_train_test["train"], batch_size=32, shuffle=True)
-    testloader = DataLoader(partition_train_test["test"], batch_size=32)
     return trainloader, testloader
 
-def flip_labels_fn(labels):
-    return (labels + 1) % 10
+
+def flip_labels_fn(labels, num_classes=10):
+    return (labels + 1) % num_classes
 
 
 def random_update_fn(net: nn.modules.Module):
@@ -118,58 +294,82 @@ def update_scaling_fn(net: nn.modules.Module, factor: float):
     for param in params:
         param.data *= factor
 
-def train(net, trainloader, epochs, device, img_col_name="image", flip_labels=False, random_update=False, update_scaling=False, factor=2):
+def train(net, trainloader, epochs, device, flip_labels=False, random_update=False, update_scaling=False, factor=2, num_classes=10):
     """Train the model on the training set."""
-    net.to(device)  # move model to GPU if available
+    net.to(device)
     criterion = torch.nn.CrossEntropyLoss().to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
     net.train()
     running_loss = 0.0
     total = 0
     correct = 0
+
     for _ in range(epochs):
-        for i, batch in enumerate(trainloader):
-            images = batch[img_col_name].to(device)
-            labels = batch["label"].to(device)
+        for i, (images, labels) in enumerate(trainloader):   # <-- unpack tuple
+            images, labels = images.to(device), labels.to(device)
             if flip_labels:
-                labels = flip_labels_fn(labels)
+                labels = flip_labels_fn(labels, num_classes)
+
             optimizer.zero_grad()
             outputs = net(images)
-            loss = criterion(outputs, labels.to(device))
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
+
+            running_loss += loss.detach().item()
             correct += (outputs.argmax(1) == labels).sum().item()
             total += labels.size(0)
+
     accuracy = correct / total
     avg_trainloss = running_loss / (len(trainloader) * epochs)
+
     if random_update:
         random_update_fn(net)
     elif update_scaling:
         update_scaling_fn(net, factor=factor)
+
     return avg_trainloss, accuracy
 
-def test(net, testloader, device, img_col_name="image"):
+
+def test(net, testloader, device, flip_labels=False):
     """Validate the model on the test set."""
     net.to(device)
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.CrossEntropyLoss().to(device)
     correct, loss = 0, 0.0
     predictions = []
     prediction_labels = []
+
+    total_loss = 0.0
+    total_examples = 0
+
+    net.eval()
     with torch.no_grad():
-        for batch in testloader:
-            images = batch[img_col_name].to(device)
-            labels = batch["label"].to(device)
+        for images, labels in testloader:   # <-- unpack tuple
+            images, labels = images.to(device), labels.to(device)
+
+            if flip_labels:
+                labels = flip_labels_fn(labels)
+
             outputs = net(images)
             prediction = torch.max(outputs.data, 1)[1]
+
             predictions.append(prediction.cpu().numpy().tolist())
             prediction_labels.append(labels.cpu().numpy().tolist())
-            loss += criterion(outputs, labels).item()
-            correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
-    accuracy = correct / len(testloader.dataset)
-    loss = loss / len(testloader)
-    return loss, accuracy, {"predictions": np.concatenate(predictions), "labels": np.concatenate(prediction_labels)}
 
+            batch_loss = criterion(outputs, labels)
+            batch_size = images.size(0)
+
+            total_loss += batch_loss.item() * batch_size
+            total_examples += batch_size
+            correct += (prediction == labels).sum().item()
+
+    accuracy = correct / len(testloader.dataset)
+    loss = total_loss / total_examples
+
+    return loss, accuracy, {
+        "predictions": np.concatenate(predictions),
+        "labels": np.concatenate(prediction_labels),
+    }
 
 def get_weights(net: nn.Module):
     return [param.detach().cpu().numpy() for _, param in net.named_parameters() if param.requires_grad]
@@ -185,5 +385,6 @@ def set_weights(net, parameters):
     net.load_state_dict(state_dict, strict=False)
 
 def freeze_model(net):
-    for param in net.parameters():
-        param.requires_grad = False
+    for name, param in net.named_parameters():
+        if "layer4" not in name and "fc" not in name:  # only train layer4 + fc
+            param.requires_grad = False

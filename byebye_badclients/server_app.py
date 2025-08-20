@@ -2,12 +2,12 @@
 import json
 import os
 import time
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 
 from flwr.common import Context, ndarrays_to_parameters, Parameters, FitIns, parameters_to_ndarrays, \
-    MetricsAggregationFn
+    MetricsAggregationFn, FitRes, Scalar
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig, ClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy import FedAvg
@@ -166,6 +166,30 @@ def analyze_pattern(rep_var):
     else:
         return 'adaptive-attack'
 
+class FedAvgWrapper(FedAvg):
+    def __init__(self, server_rounds, **kwargs):
+        super().__init__(**kwargs)
+        self.aggregation_times = {}
+        self.server_rounds = server_rounds
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: list[tuple[ClientProxy, FitRes]],
+        failures: list[Union[tuple[ClientProxy, FitRes], BaseException]],
+    ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
+
+        aggregate_start = time.time()
+        res = super().aggregate_fit(server_round=server_round, results=results, failures=failures)
+        aggregate_end = time.time()
+
+        self.aggregation_times[server_round] = aggregate_end - aggregate_start
+        if server_round == self.server_rounds:
+            base_path = "results/latency/"
+            os.makedirs(base_path, exist_ok=True)
+
+            filepath = os.path.join(base_path, "aggregation_time.csv")
+            dict_to_csv(self.aggregation_times, filepath=filepath, column_name="Aggregation Time (s)")
+        return res
 
 class WeightedFedAvg(FedAvg):
     def __init__(self, server_rounds, fit_metrics_aggregation_fn: Optional[MetricsAggregationFn] = None,
@@ -219,9 +243,10 @@ class WeightedFedAvg(FedAvg):
         self.hard_benign_inclusion_rate_global = {}
         self.soft_benign_exclusion_rate_global = {}
         self.hard_benign_exclusion_rate_global = {}
+        self.aggregation_times = {}
 
     def aggregate_fit(self, server_round, results, failures):
-        now = time.time()
+        aggregation_start = time.time()
 
         if not results:
             return None, {}
@@ -259,7 +284,7 @@ class WeightedFedAvg(FedAvg):
         for client, fit_res in results:
             print(f"Behavior: {fit_res.metrics["role"]}" + (f" Attack Pattern: {self.clients[client.cid].attack_pattern}" if
                   self.clients[client.cid].role == str(Role.MALICIOUS) else ""))
-            others_reduced_update_matrix = np.delete(reduced_update_matrix, cids.index(client.cid), axis=0)
+            others_reduced_update_matrix = np.delete(reduced_update_matrix, cids.index(client.cid), axis=0) if len(results) >= 2 else reduced_update_matrix
             mean = np.mean(others_reduced_update_matrix, axis=0)
 
             lw = LedoitWolf()
@@ -268,7 +293,7 @@ class WeightedFedAvg(FedAvg):
 
             client_idx = cids.index(client.cid)
             reduced_update_vector = reduced_update_matrix[client_idx, :]
-            self.clients[client.cid].update_scores(fit_res=fit_res, reduced_update_vector=reduced_update_vector, now=now, mean=mean, inv_covariance=inv_covariance,
+            self.clients[client.cid].update_scores(fit_res=fit_res, reduced_update_vector=reduced_update_vector, now=aggregation_start, mean=mean, inv_covariance=inv_covariance,
                                                    reliability_threshold=self.reliability_threshold,
                                                    reputation_weights=self.reputation_weights,
                                                    alpha=self.alpha, beta=self.beta,
@@ -355,8 +380,15 @@ class WeightedFedAvg(FedAvg):
         for client, _ in results:
             self.clients[client.cid].reputation_decay_recovery(recovery=self.recovery, decay=self.decay)
 
-        aggregation_time = time.time()
 
+        aggregation_end = time.time()
+        self.aggregation_times[server_round] = aggregation_end - aggregation_start
+        if server_round == self.server_rounds:
+            base_path = "results/latency/"
+            os.makedirs(base_path, exist_ok=True)
+
+            filepath = os.path.join(base_path, "aggregation_time.csv")
+            dict_to_csv(self.aggregation_times, filepath=filepath, column_name="Aggregation Time (s)")
         return ndarrays_to_parameters(new_params) , metrics_aggregated
 
     def dynamic_reputation_weight_computation(self):
@@ -496,88 +528,88 @@ class WeightedFedAvg(FedAvg):
         os.makedirs(base_path, exist_ok=True)
 
         filepath = os.path.join(base_path, "robustness_score.csv")
-        dict_to_csv(d=self.robustness_score_round, filepath=filepath, column_name="robustness_score_per_round")
+        dict_to_csv(d=self.robustness_score_round, filepath=filepath, column_name="robustness score per round")
 
         filepath = os.path.join(base_path, "hard_malicious_detection_rate.csv")
-        dict_to_csv(d=self.hard_malicious_exclusion_rate_round, filepath=filepath, column_name="hard_malicious_detection_rate_per_round")
+        dict_to_csv(d=self.hard_malicious_exclusion_rate_round, filepath=filepath, column_name="hard malicious detection rate per round")
 
         filepath = os.path.join(base_path, "soft_malicious_detection_rate.csv")
-        dict_to_csv(d=self.soft_malicious_exclusion_rate_round, filepath=filepath, column_name="soft_malicious_detection_rate_per_round")
+        dict_to_csv(d=self.soft_malicious_exclusion_rate_round, filepath=filepath, column_name="soft malicious detection rate per round")
 
         filepath = os.path.join(base_path, "soft_malicious_inclusion_rate.csv")
-        dict_to_csv(d=self.soft_malicious_inclusion_rate_round, filepath=filepath, column_name="soft_malicious_inclusion_rate_per_round")
+        dict_to_csv(d=self.soft_malicious_inclusion_rate_round, filepath=filepath, column_name="soft malicious inclusion rate per round")
 
         filepath = os.path.join(base_path, "hard_malicious_inclusion_rate.csv")
-        dict_to_csv(d=self.hard_malicious_inclusion_rate_round, filepath=filepath, column_name="hard_malicious_inclusion_rate_per_round")
+        dict_to_csv(d=self.hard_malicious_inclusion_rate_round, filepath=filepath, column_name="hard malicious inclusion rate per round")
 
         filepath = os.path.join(base_path, "hard_benign_inclusion_rate.csv")
-        dict_to_csv(d=self.hard_benign_inclusion_rate_round, filepath=filepath, column_name="hard_benign_inclusion_rate_per_round")
+        dict_to_csv(d=self.hard_benign_inclusion_rate_round, filepath=filepath, column_name="hard benign inclusion rate per round")
 
         filepath = os.path.join(base_path, "soft_benign_inclusion_rate.csv")
-        dict_to_csv(d=self.soft_benign_inclusion_rate_round, filepath=filepath, column_name="soft_benign_inclusion_rate_per_round")
+        dict_to_csv(d=self.soft_benign_inclusion_rate_round, filepath=filepath, column_name="soft benign inclusion rate per round")
 
         filepath = os.path.join(base_path, "soft_benign_exclusion_rate.csv")
-        dict_to_csv(d=self.soft_benign_exclusion_rate_round, filepath=filepath, column_name="soft_benign_exclusion_rate_per_round")
+        dict_to_csv(d=self.soft_benign_exclusion_rate_round, filepath=filepath, column_name="soft benign exclusion rate per round")
 
         filepath = os.path.join(base_path, "hard_benign_exclusion_rate.csv")
-        dict_to_csv(d=self.hard_benign_exclusion_rate_round, filepath=filepath, column_name="hard_benign_exclusion_rate_per_round")
+        dict_to_csv(d=self.hard_benign_exclusion_rate_round, filepath=filepath, column_name="hard benign exclusion rate per round")
 
         filepath = os.path.join(base_path, "num_untrusted_clients.csv")
-        dict_to_csv(d=self.num_untrusted_clients_round, filepath=filepath, column_name="num_untrusted_clients_per_round")
+        dict_to_csv(d=self.num_untrusted_clients_round, filepath=filepath, column_name="num untrusted clients per round")
 
         filepath = os.path.join(base_path, "num_trusted_clients.csv")
-        dict_to_csv(d=self.num_trusted_clients_round, filepath=filepath, column_name="num_trusted_clients_per_round")
+        dict_to_csv(d=self.num_trusted_clients_round, filepath=filepath, column_name="num trusted clients per round")
 
         filepath = os.path.join(base_path, "num_suspicious_clients.csv")
-        dict_to_csv(d=self.num_suspicious_clients_round, filepath=filepath, column_name="num_suspicious_clients_per_round")
+        dict_to_csv(d=self.num_suspicious_clients_round, filepath=filepath, column_name="num suspicious clients per round")
 
         # Global
         base_path = os.path.abspath(f"results/robustness/overall/")
         os.makedirs(base_path, exist_ok=True)
 
         filepath = os.path.join(base_path, "robustness_score.csv")
-        dict_to_csv(d=self.robustness_score_global, filepath=filepath, column_name="robustness_score_overall")
+        dict_to_csv(d=self.robustness_score_global, filepath=filepath, column_name="robustness score overall")
 
         filepath = os.path.join(base_path, "hard_malicious_detection_rate.csv")
         dict_to_csv(d=self.hard_malicious_exclusion_rate_global, filepath=filepath,
-                    column_name="hard_malicious_detection_rate_overall")
+                    column_name="hard malicious detection rate overall")
 
         filepath = os.path.join(base_path, "soft_malicious_detection_rate.csv")
         dict_to_csv(d=self.soft_malicious_exclusion_rate_global, filepath=filepath,
-                    column_name="soft_malicious_detection_rate_overall")
+                    column_name="soft malicious detection rate overall")
 
         filepath = os.path.join(base_path, "soft_malicious_inclusion_rate.csv")
         dict_to_csv(d=self.soft_malicious_inclusion_rate_global, filepath=filepath,
-                    column_name="soft_malicious_inclusion_rate_overall")
+                    column_name="soft malicious inclusion rate overall")
 
         filepath = os.path.join(base_path, "hard_malicious_inclusion_rate.csv")
         dict_to_csv(d=self.hard_malicious_inclusion_rate_global, filepath=filepath,
-                    column_name="hard_malicious_inclusion_rate_overall")
+                    column_name="hard malicious inclusion rate overall")
 
         filepath = os.path.join(base_path, "hard_benign_inclusion_rate.csv")
         dict_to_csv(d=self.hard_benign_inclusion_rate_global, filepath=filepath,
-                    column_name="hard_benign_inclusion_rate_overall")
+                    column_name="hard benign inclusion rate overall")
 
         filepath = os.path.join(base_path, "soft_benign_inclusion_rate.csv")
         dict_to_csv(d=self.soft_benign_inclusion_rate_global, filepath=filepath,
-                    column_name="soft_benign_inclusion_rate_overall")
+                    column_name="soft benign inclusion rate overall")
 
         filepath = os.path.join(base_path, "soft_benign_exclusion_rate.csv")
         dict_to_csv(d=self.soft_benign_exclusion_rate_global, filepath=filepath,
-                    column_name="soft_benign_exclusion_rate_overall")
+                    column_name="soft benign exclusion rate overall")
 
         filepath = os.path.join(base_path, "hard_benign_exclusion_rate.csv")
         dict_to_csv(d=self.hard_benign_exclusion_rate_global, filepath=filepath,
-                    column_name="hard_benign_exclusion_rate_overall")
+                    column_name="hard benign exclusion rate overall")
 
         filepath = os.path.join(base_path, "num_untrusted_clients.csv")
-        dict_to_csv(d=self.num_untrusted_clients_global, filepath=filepath, column_name="num_untrusted_clients_overall")
+        dict_to_csv(d=self.num_untrusted_clients_global, filepath=filepath, column_name="num untrusted clients overall")
 
         filepath = os.path.join(base_path, "num_trusted_clients.csv")
-        dict_to_csv(d=self.num_trusted_clients_global, filepath=filepath, column_name="num_trusted_clients_overall")
+        dict_to_csv(d=self.num_trusted_clients_global, filepath=filepath, column_name="num trusted clients overall")
 
         filepath = os.path.join(base_path, "num_suspicious_clients.csv")
-        dict_to_csv(d=self.num_suspicious_clients_global, filepath=filepath, column_name="num_suspicious_clients_overall")
+        dict_to_csv(d=self.num_suspicious_clients_global, filepath=filepath, column_name="num suspicious clients coverall")
 
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager
@@ -585,13 +617,14 @@ class WeightedFedAvg(FedAvg):
         """Configure the next round of training."""
 
         send_time = time.time()
-        config = {"send_time": send_time}
 
+        config = {}
         if self.on_fit_config_fn is not None:
             # Custom fit config function provided
             config = self.on_fit_config_fn(server_round)
-        fit_ins = FitIns(parameters, config)
 
+        config["send_time"] = send_time
+        fit_ins = FitIns(parameters, config)
         # Sample clients
         sample_size, min_num_clients = self.num_fit_clients(
             client_manager.num_available()
@@ -629,6 +662,7 @@ def server_fn(context: Context):
     no_defense_fedavg = context.run_config["no-defense-fedavg"]
     num_rounds = context.run_config["num-server-rounds"]
     fraction_fit = context.run_config["fraction-fit"]
+    fraction_evaluate = context.run_config["fraction-evaluate"]
     hf_dataset = context.run_config["dataset"]
     base_reliability_threshold = context.run_config["base-reliability-threshold"]
     alpha = context.run_config["alpha"]
@@ -650,11 +684,19 @@ def server_fn(context: Context):
 
     # Define strategy
     if no_defense_fedavg:
-        strategy = FedAvg(fraction_fit=fraction_fit,
-                          initial_parameters=parameters,
-                          fit_metrics_aggregation_fn=get_fit_metrics_aggregation_fn(context),
-                          evaluate_metrics_aggregation_fn=get_evaluate_metrics_aggregation_fn(context),
-                          on_fit_config_fn=lambda server_round: {"send_time": time.time()})
+        strategy = FedAvgWrapper(
+            server_rounds=num_rounds,
+            fraction_fit=fraction_fit,
+            fraction_evaluate=fraction_evaluate,
+            initial_parameters=parameters,
+            fit_metrics_aggregation_fn=get_fit_metrics_aggregation_fn(context),
+            evaluate_metrics_aggregation_fn=get_evaluate_metrics_aggregation_fn(context),
+            min_available_clients=1,
+            min_fit_clients=1,
+            min_evaluate_clients=1,
+            on_fit_config_fn=lambda server_round: {"send_time": time.time(), "dataset": dataset},
+            on_evaluate_config_fn=lambda server_round: {"dataset": dataset}
+        )
     else:
         strategy = WeightedFedAvg(
             server_rounds=num_rounds,
@@ -664,11 +706,15 @@ def server_fn(context: Context):
             gamma=gamma, delta=delta, recovery=recovery, decay=decay,
             late_training_threshold=late_training_threshold,
             fraction_fit=fraction_fit,
-            fraction_evaluate=1.0,
-            min_available_clients=2,
+            fraction_evaluate=fraction_evaluate,
+            min_available_clients=1,
+            min_fit_clients=1,
+            min_evaluate_clients=1,
             initial_parameters=parameters,
             fit_metrics_aggregation_fn=get_fit_metrics_aggregation_fn(context),
             evaluate_metrics_aggregation_fn=get_evaluate_metrics_aggregation_fn(context),
+            on_fit_config_fn=lambda server_round: {"dataset": dataset},
+            on_evaluate_config_fn=lambda server_round: {"dataset": dataset}
         )
     config = ServerConfig(num_rounds=num_rounds)
 

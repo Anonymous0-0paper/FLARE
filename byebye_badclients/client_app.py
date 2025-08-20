@@ -50,13 +50,15 @@ class FlowerClient(NumPyClient):
         self.existing_attack_patterns = existing_attack_patterns
         self.update_scaling_factor = update_scaling_factor
         self.no_defense_fedavg = no_defense_fedavg
+
     def fit(self, parameters, config):
         receive_time = time.time()
 
         server_send_time = config["send_time"]
 
         set_weights(self.net, parameters)
-        img_col_name = "img" if self.dataset_name == 'cifar10' else "image"
+
+        num_classes = 100 if config["dataset"] == "cifar100" else 10
 
         attack_patterns = {"flip_labels": False,
                            "random_update": False,
@@ -84,11 +86,11 @@ class FlowerClient(NumPyClient):
             self.trainloader,
             self.local_epochs,
             self.device,
-            img_col_name=img_col_name,
             flip_labels=attack_patterns["flip_labels"],
             random_update=attack_patterns["random_update"],
             update_scaling=attack_patterns["update_scaling"],
-            factor=self.update_scaling_factor
+            factor=self.update_scaling_factor,
+            num_classes=num_classes
         )
         train_end = time.time()
 
@@ -107,9 +109,8 @@ class FlowerClient(NumPyClient):
         )
     def evaluate(self, parameters, config):
         set_weights(self.net, parameters)
-        img_col_name = "img" if self.dataset_name == 'cifar10' else "image"
 
-        loss, accuracy, m = test(self.net, self.valloader, self.device, img_col_name=img_col_name)
+        loss, accuracy, m = test(self.net, self.valloader, self.device)
         y_pred = m["predictions"]
         labels = m["labels"]
 
@@ -166,7 +167,7 @@ def client_fn(context: Context):
     local_epochs = context.run_config["local-epochs"]
 
     role, attack_pattern = get_role(partition_id, malicious_probability, attack_patterns)
-
+    print("Cuda Available: ", torch.cuda.is_available())
     # Return Client instance
     return FlowerClient(net, trainloader, valloader, local_epochs, dataset, cid=partition_id,
                         role=role, attack_pattern=attack_pattern, existing_attack_patterns=attack_patterns,

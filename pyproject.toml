@@ -39,15 +39,16 @@ clientapp = "byebye_badclients.client_app:app"
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
 no-defense-fedavg = false
-num-server-rounds = 50
-fraction-fit = 0.1
+num-server-rounds = 1
+fraction-fit = 1
+fraction-evaluate = 1
 local-epochs = 5
-dataset = 'ylecun/mnist' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10']
-total-max-samples = -1
+dataset = 'uoft-cs/cifar100' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10', 'uoft-cs/cifar100']
+total-max-samples = 100
 non-iid = false
 dirichlet-alpha = 0.5 # if non-iid == true
 malicious-probability = 0.3
-attack-patterns = 'adaptive-attack' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack'] and separate by comma
+attack-patterns = 'label-flipping,random-update,update-scaling,adaptive-attack' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack'] and separate by comma
 update-scaling-factor = 2
 base-reliability-threshold = 0.5
 alpha = 0.7
@@ -66,7 +67,7 @@ default = "local-simulation"
 
 # Local simulation federation with 10 virtual SuperNodes
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 100
+options.num-supernodes = 1
 
 [tool.flwr.federations.local-deployment]
 address = "127.0.0.1:9093"
