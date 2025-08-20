@@ -34,7 +34,7 @@ To start Flowers Supernodes (which will act as clients) you can use our provided
 
 After the clients are running the last thing you have to do is to start the remote federation, do this by first configuring the `pyproject.yaml` to your needs (The main part you want to modify is \[tool.flwr.app.config\]) where you can configure whether to use non-iid or not, what dataset to use, what attack pattern to use etc.
 
-VERY IMPORTANT: The first experiment for a given dataset must run with one client only (and recommended to use only one server round). The dataset will be downloaded to your host environment and will be reused for further runs. This is needed to avoid download conflicts. After this has completed you can continue with your experiments for the dataset you just downloaded.
+VERY IMPORTANT: The first experiment for a given dataset must run with one client only (and recommended to use only one server round and limit dataset size to a low number like 100, configure all mentioned settings in pyproject.toml). The dataset will be downloaded to your host environment and will be reused for further runs. This is needed to avoid download conflicts. After this has completed you can continue with your experiments for the dataset you just downloaded.
 
 Once the `pyproject.toml` is configured you can run `./server.sh`. The output of the app and client classification as well as their current scores can be checked in `byebye-badclients.out`.
 
