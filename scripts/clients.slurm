@@ -19,13 +19,13 @@ fi
 # Export variables so they're available in srun
 export IP BASE_PORT
 
-export TORCHVISION_DATA_DIR=/scratch/flwr_cache/
+export TORCHVISION_DATA_DIR=<DATASET-CACHE-DIR>
 
 srun bash -c 'PORT=$((BASE_PORT + SLURM_PROCID))
 	echo "Task $SLURM_PROCID starting on $(hostname) with port $PORT"
 	singularity run \
 	--nv \
-	--bind <HOSTPATH>:/scratch \
+	--bind <HOSTPATH>:<DIR-TO-DATASET-CACHE> \
 	byebye-badclients-supernode_latest.sif \
 	--insecure \
 	--superlink $IP:9092 \
