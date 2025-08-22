@@ -331,7 +331,7 @@ def train(net, trainloader, epochs, device, flip_labels=False, random_update=Fal
     return avg_trainloss, accuracy
 
 
-def test(net, testloader, device, flip_labels=False):
+def test(net, testloader, device):
     """Validate the model on the test set."""
     net.to(device)
     criterion = torch.nn.CrossEntropyLoss().to(device)
@@ -346,9 +346,6 @@ def test(net, testloader, device, flip_labels=False):
     with torch.no_grad():
         for images, labels in testloader:   # <-- unpack tuple
             images, labels = images.to(device), labels.to(device)
-
-            if flip_labels:
-                labels = flip_labels_fn(labels)
 
             outputs = net(images)
             prediction = torch.max(outputs.data, 1)[1]
@@ -386,5 +383,4 @@ def set_weights(net, parameters):
 
 def freeze_model(net):
     for name, param in net.named_parameters():
-        if "layer4" not in name and "fc" not in name:  # only train layer4 + fc
-            param.requires_grad = False
+        param.requires_grad = False

@@ -1,3 +1,7 @@
+**/results/
+**/saved_results/
+**/data/
+
 __pycache__/
 *.py[cod]
 *$py.class

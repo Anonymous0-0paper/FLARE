@@ -180,6 +180,7 @@ class FedAvgWrapper(FedAvg):
 
         aggregate_start = time.time()
         res = super().aggregate_fit(server_round=server_round, results=results, failures=failures)
+        print({c.cid: result.metrics["loss"] for c, result in results})
         aggregate_end = time.time()
 
         self.aggregation_times[server_round] = aggregate_end - aggregate_start
