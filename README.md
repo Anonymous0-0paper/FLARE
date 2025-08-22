@@ -1,9 +1,36 @@
 # ByeBye-BadClients
 \[...\]
 # Experiments
-\[...\]
+Requirements:
+| Dependency             | Version        |
+|------------------------|----------------|
+| flwr                   | ==1.20.0       |
+| flwr[simulation]       | ==1.20.0       |
+| flwr-datasets[vision]  | >=0.5.0        |
+| pandas                 | ==2.3.1        |
+| scipy                  | ~=1.16.1       |
+| torch                  | ==2.8.0        |
+| torchvision            | ==0.23.0       |
+| numpy                  | ~=2.3.2        |
+| scikit-learn           | ~=1.7.1        |
+
+> requirements.txt together with pyproject.toml includes all of these and are downloaded in the serverapp docker image
+
 ## SLURM managed Cluster
-\[...\]
+
+We performed experiments on a High Performance Cluster utilizing 13 Nodes for 100 clients.
+
+Each Node is constructed as shown in the following table:
+| Component             | Specification                             |
+|-----------------------|-------------------------------------------|
+| CPU                   | Intel Xeon Gold 6248R (24 cores @ 3.0GHz) |
+| GPU                   | 4× NVIDIA RTX 2070 (8GB each)             |
+| RAM                   | 256GB DDR4 ECC                            |
+| Storage               | 2TB NVMe SSD                              |
+| Operating System      | Ubuntu 24.04 LTS                          |
+
+The following sections show execution of the experiments on that cluster and can be applied to any SLURM managed cluster.
+
 ### Setup
 
 To run the experiments on a slurm based cluster we provided some bash scripts (found in /scripts) to make the deployment easier.
