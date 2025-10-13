@@ -294,7 +294,19 @@ def update_scaling_fn(net: nn.modules.Module, factor: float):
     for param in params:
         param.data *= factor
 
-def train(net, trainloader, epochs, device, flip_labels=False, random_update=False, update_scaling=False, factor=2, num_classes=10):
+def statistical_mimicry_fn(net: nn.modules.Module, cid, alpha=0.5, direction_accumulation_rate=0.2):
+    # save honest parameter
+    # load previous honest parameters (unique per client, created if not existing)
+    # load direction (unique per client, created if not existing, may be random, dim of parameters)
+
+    # sample epsilon = N(0, sigma)
+    # g = alpha * parameters + (1 - alpha) * (avg_honest + epsilon) + (direction_accumulation_rate * direction)
+
+    # safe direction
+    # return g
+    raise NotImplementedError
+
+def train(net, trainloader, epochs, device, flip_labels=False, random_update=False, update_scaling=False, alie=False, statistical_mimicry=False, factor=2, num_classes=10, cid=None):
     """Train the model on the training set."""
     net.to(device)
     criterion = torch.nn.CrossEntropyLoss().to(device)
@@ -327,7 +339,8 @@ def train(net, trainloader, epochs, device, flip_labels=False, random_update=Fal
         random_update_fn(net)
     elif update_scaling:
         update_scaling_fn(net, factor=factor)
-
+    elif statistical_mimicry:
+        statistical_mimicry_fn(net, round, cid)
     return avg_trainloss, accuracy
 
 

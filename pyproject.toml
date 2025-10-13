@@ -38,17 +38,17 @@ clientapp = "byebye_badclients.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-no-defense-fedavg = true
+no-defense-fedavg = false
 num-server-rounds = 25
 fraction-fit = 0.2
 fraction-evaluate = 0.8
 local-epochs = 5
 dataset = 'ylecun/mnist' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10', 'uoft-cs/cifar100']
-total-max-samples = 100
+total-max-samples = -1
 non-iid = false
 dirichlet-alpha = 0.5 # if non-iid == true
 malicious-probability = 0.3
-attack-patterns = 'label-flipping' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack'] and separate by comma
+attack-patterns = 'label-flipping' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack', 'alie', 'statistical_mimicry'] and separate by comma
 update-scaling-factor = 2
 base-reliability-threshold = 0.5
 alpha = 0.7
