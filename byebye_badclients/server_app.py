@@ -2,6 +2,7 @@
 import json
 import os
 import time
+import torch
 from typing import Optional, Union
 
 import numpy as np
@@ -19,7 +20,7 @@ from sklearn.exceptions import UndefinedMetricWarning
 from byebye_badclients.client_app import Role
 from byebye_badclients.result_processing import list_to_csv, robustness_metric, hard_rate_metric, dict_to_csv, \
     soft_target_exclusion_rate_metric, soft_target_inclusion_rate_metric
-from byebye_badclients.task import get_weights
+from byebye_badclients.task import get_weights, mean_and_sigma_flat, unflatten_parameters
 from byebye_badclients.client_reputation import ClientReputation, Classification
 from sklearn.decomposition import PCA
 
@@ -166,6 +167,36 @@ def analyze_pattern(rep_var):
     else:
         return 'adaptive-attack'
 
+# Simulate the Malicious Client network needed in ALIE
+def alie_malicious_network_aggregation_fn(results: list[tuple[ClientProxy, FitRes]]):
+    if results is None or not results:
+        return
+
+    parameters = list()
+    alie_clients = list()
+
+    # get parameters from alie clients
+    for client, res in results:
+        if res.metrics["attack_pattern"] == "alie":
+            parameters.append(res.parameters)
+            alie_clients.append((client, res))
+
+    if not alie_clients:
+        return
+
+    # bias parameters
+    mu, sigma = mean_and_sigma_flat(parameters_list=parameters)
+    sigma = torch.tensor(sigma) * 1.5
+    mu = mu - sigma
+
+    # retain shape of flwr.common.typing.Parameters
+    mu = unflatten_parameters(mu, parameters[0])
+
+    # all alie clients use mu as gradient
+    for alie_client, alie_res in alie_clients:
+        alie_res.parameters = mu
+    return
+
 class FedAvgWrapper(FedAvg):
     def __init__(self, server_rounds, **kwargs):
         super().__init__(**kwargs)
@@ -177,6 +208,8 @@ class FedAvgWrapper(FedAvg):
         results: list[tuple[ClientProxy, FitRes]],
         failures: list[Union[tuple[ClientProxy, FitRes], BaseException]],
     ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
+
+        alie_malicious_network_aggregation_fn(results)
 
         aggregate_start = time.time()
         res = super().aggregate_fit(server_round=server_round, results=results, failures=failures)
@@ -246,6 +279,7 @@ class WeightedFedAvg(FedAvg):
         self.aggregation_times = {}
 
     def aggregate_fit(self, server_round, results, failures):
+        alie_malicious_network_aggregation_fn(results)
         aggregation_start = time.time()
 
         if not results:
@@ -274,26 +308,33 @@ class WeightedFedAvg(FedAvg):
             self.clients[client.cid].participation_rate = self.clients[client.cid].participations / server_round
 
         # Update Scores
-
         anomaly_count = 0
         pca = PCA(n_components=max(int(len(results)/10), 1))
         cids = list(updates.keys())
         update_matrix = np.stack([updates[cid] for cid in cids])
+        rank = np.linalg.matrix_rank(update_matrix)
+        if rank < min(update_matrix.shape):
+            print("NO FULL RANK!")
+            coord_std = np.maximum(np.std(update_matrix, axis=0), 1e-8)
+            jitter_scale = 1e-6
+            jitter = np.random.randn(*update_matrix.shape) * (coord_std * jitter_scale)
+            update_matrix += jitter
+
         reduced_update_matrix = pca.fit_transform(update_matrix)
 
-        mcd = MinCovDet(random_state=server_round)
+        support_frac = min(0.9, len(results) / 10)
+        mcd = MinCovDet(random_state=server_round, support_fraction=support_frac)
+
+        if np.linalg.matrix_rank(reduced_update_matrix) < reduced_update_matrix.shape[1]:
+            jitter = np.random.randn(*reduced_update_matrix.shape) * 1e-6
+            reduced_update_matrix += jitter
+
         mcd_matrix = mcd.fit(reduced_update_matrix)
         mcd_mean = mcd_matrix.location_
         mcd_inv_cov = mcd_matrix.precision_
         for client, fit_res in results:
-            print(f"Behavior: {fit_res.metrics["role"]}" + (f" Attack Pattern: {self.clients[client.cid].attack_pattern}" if
+            print(f'Behavior: {fit_res.metrics["role"]}' + (f" Attack Pattern: {self.clients[client.cid].attack_pattern}" if
                   self.clients[client.cid].role == str(Role.MALICIOUS) else ""))
-            # others_reduced_update_matrix = np.delete(reduced_update_matrix, cids.index(client.cid), axis=0) if len(results) >= 2 else reduced_update_matrix
-            # mean = np.mean(others_reduced_update_matrix, axis=0)
-
-            # lw = LedoitWolf()
-            # lw.fit(others_reduced_update_matrix)
-            # inv_covariance = lw.precision_
 
             client_idx = cids.index(client.cid)
             reduced_update_vector = reduced_update_matrix[client_idx, :]

@@ -62,7 +62,9 @@ class FlowerClient(NumPyClient):
 
         attack_patterns = {"flip_labels": False,
                            "random_update": False,
-                           "update_scaling": False}
+                           "update_scaling": False,
+                           "alie": False,
+                           "statistical_mimicry": False,}
         if self.role == Role.MALICIOUS:
             if self.attack_pattern == 'label-flipping':
                 attack_patterns["flip_labels"] = True
@@ -163,7 +165,6 @@ def client_fn(context: Context):
     if len(possible_attack_patterns - attack_patterns) == 6:
         attack_patterns = []
     update_scaling_factor = context.run_config["update-scaling-factor"]
-
     # Load model and data
     dataset = hf_dataset.split('/')[-1]
     net = load_model(dataset)

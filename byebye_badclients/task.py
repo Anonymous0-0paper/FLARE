@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters, Parameters
 from torch.utils.data import DataLoader, Subset, random_split
 from torchvision.transforms import Compose, Normalize, ToTensor
 
@@ -294,17 +295,92 @@ def update_scaling_fn(net: nn.modules.Module, factor: float):
     for param in params:
         param.data *= factor
 
-def statistical_mimicry_fn(net: nn.modules.Module, cid, alpha=0.5, direction_accumulation_rate=0.2):
-    # save honest parameter
-    # load previous honest parameters (unique per client, created if not existing)
-    # load direction (unique per client, created if not existing, may be random, dim of parameters)
+def mean_and_sigma_flat(parameters_list):
+    flat_tensors = []
+    for p in parameters_list:
+        ndarrays = parameters_to_ndarrays(p)
+        # Flatten all arrays and concatenate
+        flat = torch.cat([torch.from_numpy(arr).float().view(-1) for arr in ndarrays])
+        flat_tensors.append(flat)
 
-    # sample epsilon = N(0, sigma)
-    # g = alpha * parameters + (1 - alpha) * (avg_honest + epsilon) + (direction_accumulation_rate * direction)
+    stacked = torch.stack(flat_tensors)
+    mean_flat = torch.mean(stacked, dim=0)
+    sigma_flat = torch.std(stacked, dim=0, unbiased=False)
+    return mean_flat, sigma_flat
 
-    # safe direction
-    # return g
-    raise NotImplementedError
+def flatten_parameters(parameters):
+    ndarrays = parameters_to_ndarrays(parameters)
+    return torch.cat([torch.from_numpy(x).float().view(-1) for x in ndarrays])
+
+def unflatten_parameters(flat_tensor, template_parameters):
+    ndarrays = parameters_to_ndarrays(template_parameters)
+    new_nd = []
+    idx = 0
+    for arr in ndarrays:
+        numel = arr.size
+        new_arr = flat_tensor[idx:idx + numel].reshape(arr.shape).numpy()
+        new_nd.append(new_arr)
+        idx += numel
+    return ndarrays_to_parameters(new_nd)
+
+STATE_DIR = "/tmp/flwr_client_state"
+os.makedirs(STATE_DIR, exist_ok=True)
+
+def statistical_mimicry_fn(net: torch.nn.Module, cid, alpha=0.5):
+    # Convert current net to Flower Parameters
+    current_params = ndarrays_to_parameters([p.detach().cpu().numpy() for p in net.parameters()])
+
+    state_path = f"{STATE_DIR}/{cid}.pt"
+
+    if os.path.exists(state_path):
+        # allowlist numpy.ndarray for unpickling
+        with torch.serialization.safe_globals([Parameters, np.ndarray]):
+            loaded_state = torch.load(state_path, weights_only=False)
+
+        # loaded_state["parameters"] is list of ndarrays, convert to Flower Parameters
+        state = {
+            "parameters": [ndarrays_to_parameters(p) for p in loaded_state["parameters"]],
+            "direction": loaded_state["direction"],
+            "direction_accumulation": loaded_state["direction_accumulation"],
+        }
+        state["parameters"].append(current_params)
+    else:
+        # Initialize state
+        state = {
+            "parameters": [current_params],
+            "direction": torch.randn_like(flatten_parameters(current_params)),
+            "direction_accumulation": 0.1,
+        }
+
+    # Compute mean and sigma
+    mu, sigma = mean_and_sigma_flat(state["parameters"])
+
+    # Sample epsilon ~ N(0, sigma)
+    epsilon = torch.randn_like(sigma) * sigma
+
+    current_flat = flatten_parameters(current_params)
+    g_flat = (
+        (1 - alpha) * current_flat
+        + alpha * (mu + epsilon)
+        + state["direction_accumulation"] * state["direction"]
+    )
+
+    state["direction_accumulation"] *= 1.2 if state["direction_accumulation"] < 2 else state["direction_accumulation"]
+    state["direction"] = state["direction"] / (torch.norm(state["direction"]) + 1e-12)
+
+    # Save state (ndarrays are safe)
+    torch.save(
+        {
+            "parameters": [parameters_to_ndarrays(p) for p in state["parameters"]],
+            "direction": state["direction"],
+            "direction_accumulation": state["direction_accumulation"],
+        },
+        state_path,
+    )
+
+    g_parameters = unflatten_parameters(g_flat, current_params)
+    return g_parameters
+
 
 def train(net, trainloader, epochs, device, flip_labels=False, random_update=False, update_scaling=False, alie=False, statistical_mimicry=False, factor=2, num_classes=10, cid=None):
     """Train the model on the training set."""
@@ -393,6 +469,23 @@ def set_weights(net, parameters):
     params_dict = zip(trainable_keys, parameters)
     state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
     net.load_state_dict(state_dict, strict=False)
+
+def parameters_to_tensor(parameters) -> torch.Tensor:
+    """Convert flwr.common.Parameters to a single flattened tensor."""
+    ndarrays = parameters_to_ndarrays(parameters)  # list of numpy arrays
+    flat = torch.tensor([], dtype=torch.float32)
+    for arr in ndarrays:
+        flat = torch.cat([flat, torch.from_numpy(arr).float()])
+    return flat
+
+def parameters_to_tensorlist(parameters):
+    ndarrays = parameters_to_ndarrays(parameters)
+    return [torch.from_numpy(arr).float() for arr in ndarrays]
+
+def parameters_multiply_scalar(parameters, scalar):
+    for p in parameters():
+        p.data = p.data * scalar
+    return parameters
 
 def freeze_model(net):
     for name, param in net.named_parameters():
