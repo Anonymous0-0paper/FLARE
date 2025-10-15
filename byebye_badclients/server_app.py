@@ -189,12 +189,13 @@ def alie_malicious_network_aggregation_fn(results: list[tuple[ClientProxy, FitRe
     sigma = torch.tensor(sigma) * 1.5
     mu = mu - sigma
 
-    # retain shape of flwr.common.typing.Parameters
-    mu = unflatten_parameters(mu, parameters[0])
-
     # all alie clients use mu as gradient
     for alie_client, alie_res in alie_clients:
-        alie_res.parameters = mu
+        g = 0.9 * mu + 0.1 * torch.randn_like(mu)
+
+        # retain shape of flwr.common.typing.Parameters
+        g = unflatten_parameters(g, parameters[0])
+        alie_res.parameters = g
     return
 
 class FedAvgWrapper(FedAvg):

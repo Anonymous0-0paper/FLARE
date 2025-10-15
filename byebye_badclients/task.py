@@ -6,10 +6,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
 from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters, Parameters
 from torch.utils.data import DataLoader, Subset, random_split
-from torchvision.transforms import Compose, Normalize, ToTensor
+from torchvision import datasets, transforms
 
 class Net(nn.Module):
     def __init__(self):
@@ -46,64 +45,6 @@ class NetMNIST(nn.Module):
         x = self.pool(F.relu(self.conv1(x)))
         x = x.view(-1, 6 * 13 * 13)
         return self.fc1(x)
-
-
-def create_dirichlet_partition(labels: np.ndarray, num_partitions: int, alpha: float = 0.5) -> dict:
-    """Create Dirichlet non-IID partitions based on labels."""
-    # Set seed for reproducible partitioning
-    np.random.seed(num_partitions)
-
-    num_classes = len(np.unique(labels))
-    label_distribution = np.random.dirichlet([alpha] * num_classes, num_partitions)
-
-    # Get indices for each class
-    class_indices = {}
-    for class_id in range(num_classes):
-        class_indices[class_id] = np.where(labels == class_id)[0]
-
-    partitions = {i: [] for i in range(num_partitions)}
-
-    for class_id in range(num_classes):
-        class_idx = class_indices[class_id].copy()
-        np.random.shuffle(class_idx)
-
-        # Split class indices according to Dirichlet distribution
-        splits = np.cumsum(label_distribution[:, class_id] * len(class_idx)).astype(int)
-        splits = np.concatenate([[0], splits])
-
-        for partition_id in range(num_partitions):
-            start_idx = splits[partition_id]
-            end_idx = splits[partition_id + 1]
-            partitions[partition_id].extend(class_idx[start_idx:end_idx].tolist())
-
-    for partition_id in range(num_partitions):
-        np.random.seed(partition_id)
-        np.random.shuffle(partitions[partition_id])
-
-    return partitions
-
-
-def create_iid_partition(dataset_size: int, num_partitions: int) -> dict:
-    """Create IID partitions."""
-    # Set seed for reproducible partitioning
-    np.random.seed(num_partitions)
-
-    indices = list(range(dataset_size))
-    np.random.shuffle(indices)
-
-    partition_size = dataset_size // num_partitions
-    partitions = {}
-
-    for i in range(num_partitions):
-        start_idx = i * partition_size
-        if i == num_partitions - 1:  # Last partition gets remaining samples
-            end_idx = dataset_size
-        else:
-            end_idx = (i + 1) * partition_size
-        partitions[i] = indices[start_idx:end_idx]
-
-    return partitions
-
 
 class PartitionDataset:
     """Mock FederatedDataset partition to maintain similar API."""
@@ -175,111 +116,96 @@ class MockFederatedDataset:
         partition_indices = self.partitions[partition_id]
         return PartitionDataset(self.torchvision_dataset, partition_indices)
 
-partitioned_datasets = {}
+def create_iid_partition(num_samples: int, num_partitions: int):
+    """Simple IID split: uniform random chunks."""
+    indices = np.random.permutation(num_samples)
+    return {i: indices[i::num_partitions].tolist() for i in range(num_partitions)}
+
+def create_dirichlet_partition(labels: np.ndarray, num_partitions: int, alpha: float = 0.5):
+    """Dirichlet non-IID partitions. Proper version."""
+    np.random.seed(0)
+    partitions = {i: [] for i in range(num_partitions)}
+    num_classes = len(np.unique(labels))
+
+    for class_id in range(num_classes):
+        class_indices = np.where(labels == class_id)[0]
+        np.random.shuffle(class_indices)
+        proportions = np.random.dirichlet([alpha] * num_partitions)
+        split_points = (np.cumsum(proportions) * len(class_indices)).astype(int)
+        start = 0
+        for i, end in enumerate(split_points):
+            partitions[i].extend(class_indices[start:end])
+            start = end
+
+    for p in partitions.values():
+        np.random.shuffle(p)
+
+    return partitions
+
+# Cache to avoid refetching only
+_global_dataset_cache = {}
+
+
 def load_data(
     partition_id: int,
     num_partitions: int,
     dataset: str,
-    total_max_samples: int,
+    total_max_samples: int = -1,
     non_iid: bool = False,
     dirichlet_alpha: float = 0.5,
 ):
-    """Load partition data using torchvision datasets (no HuggingFace)."""
-
+    """Return:
+       -> trainloader for this client
+       -> global testloader (shared across all clients)
+    """
     dataset_name = dataset.split("/")[-1]
-
-    # Pick cache dir
-    cache_dir = os.environ.get("TORCHVISION_DATA_DIR", f"./data/")
+    cache_dir = os.environ.get("TORCHVISION_DATA_DIR", "./data/")
     os.makedirs(cache_dir, exist_ok=True)
 
-    # Partition cache key
-    partition_key = f"{dataset_name}_{num_partitions}_{non_iid}_{dirichlet_alpha}"
+    cache_key = f"{dataset_name}"
 
-    if partition_key not in partitioned_datasets:
-        print(f"Initializing partitioned dataset for {dataset_name}...")
-
-        # Choose transforms
+    # Load & cache dataset once
+    if cache_key not in _global_dataset_cache:
         if dataset_name == "mnist":
-            transform = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
-            torchvision_dataset = torchvision.datasets.MNIST(
-                root=cache_dir, train=True, download=True, transform=transform
-            )
+            transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+            full_train = datasets.MNIST(cache_dir, train=True, download=True, transform=transform)
+            test_set = datasets.MNIST(cache_dir, train=False, download=True, transform=transform)
         elif dataset_name == "cifar10":
-            transform = Compose(
-                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-            )
-            torchvision_dataset = torchvision.datasets.CIFAR10(
-                root=cache_dir, train=True, download=True, transform=transform
-            )
-        elif dataset_name == "cifar100":
-            transform = Compose(
-                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-            )
-            torchvision_dataset = torchvision.datasets.CIFAR100(
-                root=cache_dir, train=True, download=True, transform=transform
-            )
-        elif dataset_name == "svhn":
-            transform = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
-            torchvision_dataset = torchvision.datasets.SVHN(
-                root=cache_dir, split="train", download=True, transform=transform
-            )
+            transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5, 0.5, 0.5))])
+            full_train = datasets.CIFAR10(cache_dir, train=True, download=True, transform=transform)
+            test_set = datasets.CIFAR10(cache_dir, train=False, download=True, transform=transform)
         else:
-            print(f"Warning: Unknown dataset {dataset_name}, defaulting to CIFAR10")
-            transform = Compose(
-                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-            )
-            torchvision_dataset = torchvision.datasets.CIFAR10(
-                root=cache_dir, train=True, download=True, transform=transform
-            )
+            raise ValueError(f"Unknown dataset: {dataset_name}")
 
-        # Extract labels
-        if hasattr(torchvision_dataset, "targets"):
-            labels = np.array(torchvision_dataset.targets)
-        elif hasattr(torchvision_dataset, "labels"):
-            labels = np.array(torchvision_dataset.labels)
-        else:
-            labels = np.array([lbl for _, lbl in torchvision_dataset])
+        _global_dataset_cache[cache_key] = (full_train, test_set)
 
-        # Partition indices
-        if non_iid:
-            partitions = create_dirichlet_partition(
-                labels, num_partitions, dirichlet_alpha
-            )
-        else:
-            partitions = create_iid_partition(
-                len(torchvision_dataset), num_partitions
-            )
+    full_train, test_set = _global_dataset_cache[cache_key]
 
-        partitioned_datasets[partition_key] = (torchvision_dataset, partitions)
+    # Partition only the training dataset
+    if hasattr(full_train, "targets"):
+        labels = np.array(full_train.targets)
+    else:
+        labels = np.array([lbl for _, lbl in full_train])
 
-    torchvision_dataset, partitions = partitioned_datasets[partition_key]
+    if non_iid:
+        partitions = create_dirichlet_partition(labels, num_partitions, dirichlet_alpha)
+    else:
+        partitions = create_iid_partition(len(full_train), num_partitions)
 
-    # Pick this client’s partition
-    indices = partitions[partition_id]
-    partition = Subset(torchvision_dataset, indices)
+    # Pick indices for THIS client
+    client_indices = partitions[partition_id]
 
-    # Train/test split (80/20)
-    n_total = len(partition)
-    n_test = n_total // 5
-    test_indices = indices[:n_test]
-    train_indices = indices[n_test:]
+    # Optional cap
+    if total_max_samples > 0:
+        client_indices = client_indices[:total_max_samples]
 
-    train_set = Subset(torchvision_dataset, train_indices)
-    test_set = Subset(torchvision_dataset, test_indices)
-
-    # Cap max samples if requested
-    if total_max_samples != -1:
-        max_train = min(total_max_samples, len(train_set))
-        max_test = min(total_max_samples, len(test_set))
-        train_set = Subset(train_set, list(range(max_train)))
-        test_set = Subset(test_set, list(range(max_test)))
+    train_subset = Subset(full_train, client_indices)
 
     # DataLoaders
-    trainloader = DataLoader(train_set, batch_size=32, shuffle=True)
-    testloader = DataLoader(test_set, batch_size=32)
+    trainloader = DataLoader(train_subset, batch_size=32, shuffle=True)
+    testloader = DataLoader(test_set, batch_size=64, shuffle=False)
 
     return trainloader, testloader
-
 
 def flip_labels_fn(labels, num_classes=10):
     return (labels + 1) % num_classes

@@ -1,6 +1,7 @@
 **/results/
 **/saved_results/
 **/data/
+plots/
 
 __pycache__/
 *.py[cod]
