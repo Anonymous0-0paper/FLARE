@@ -39,12 +39,12 @@ clientapp = "byebye_badclients.client_app:app"
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
 no-defense-fedavg = false
-num-server-rounds = 5
+num-server-rounds = 1
 fraction-fit = 0.2
 fraction-evaluate = 0.8
 local-epochs = 5
-dataset = 'ylecun/mnist' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10', 'uoft-cs/cifar100']
-total-max-samples = -1
+dataset = 'ufldl-stanford/svhn' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10', 'uoft-cs/cifar100']
+total-max-samples = 2000
 non-iid = true
 dirichlet-alpha = 0.5 # if non-iid == true
 malicious-probability = 0.4

@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision
 from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters, Parameters
 from torch.utils.data import DataLoader, Subset, random_split
 from torchvision import datasets, transforms
@@ -174,6 +175,16 @@ def load_data(
             transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5, 0.5, 0.5))])
             full_train = datasets.CIFAR10(cache_dir, train=True, download=True, transform=transform)
             test_set = datasets.CIFAR10(cache_dir, train=False, download=True, transform=transform)
+        elif dataset_name == "svhn":
+            transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=(0.5,), std=(0.5,))])
+            full_train = datasets.SVHN(cache_dir, split="train", download=True, transform=transform)
+            test_set = datasets.SVHN(cache_dir, split="test", download=True, transform=transform)
+        elif dataset_name == "cifar100":
+            transform = transforms.Compose(
+                [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+            )
+            full_train = torchvision.datasets.CIFAR100(cache_dir, train=True, download=True, transform=transform)
+            test_set = torchvision.datasets.CIFAR100(cache_dir, train=False, download=True, transform=transform)
         else:
             raise ValueError(f"Unknown dataset: {dataset_name}")
 
