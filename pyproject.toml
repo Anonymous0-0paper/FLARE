@@ -16,12 +16,12 @@ license = "Apache-2.0"
 dependencies = [
     "flwr[simulation]==1.20.0",
     "flwr-datasets[vision]>=0.5.0",
-    "torch==2.8.0",
-    "torchvision==0.23.0",
-    "pandas==2.3.1",
-    "scipy~=1.16.1",
-    "numpy~=2.3.2",
-    "scikit-learn~=1.7.1"
+    "torch==2.8.0a0+5228986c39.nv25.6",
+    "torchvision==0.22.0a0+95f10a4e",
+    "pandas",
+    "scipy",
+    "numpy",
+    "scikit-learn"
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -65,7 +65,7 @@ late-training-threshold = 0.6
 [tool.flwr.federations]
 default = "local-simulation"
 
-# Local simulation federation with 10 virtual SuperNodes
+# Local simulation federation with 100 virtual SuperNodes
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 100
 
