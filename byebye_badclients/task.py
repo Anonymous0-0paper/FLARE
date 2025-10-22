@@ -213,8 +213,8 @@ def load_data(
     train_subset = Subset(full_train, client_indices)
 
     # DataLoaders
-    trainloader = DataLoader(train_subset, batch_size=32, shuffle=True)
-    testloader = DataLoader(test_set, batch_size=64, shuffle=False)
+    trainloader = DataLoader(train_subset, batch_size=32, shuffle=True, drop_last=True)
+    testloader = DataLoader(test_set, batch_size=64, shuffle=False, drop_last=True)
 
     return trainloader, testloader
 
