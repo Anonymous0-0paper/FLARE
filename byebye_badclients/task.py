@@ -1,5 +1,6 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
 import os
+import pickle
 from collections import OrderedDict
 
 import numpy as np
@@ -260,41 +261,39 @@ def unflatten_parameters(flat_tensor, template_parameters):
         idx += numel
     return ndarrays_to_parameters(new_nd)
 
-STATE_DIR = "/tmp/flwr_client_state"
-os.makedirs(STATE_DIR, exist_ok=True)
-
 def statistical_mimicry_fn(net: torch.nn.Module, cid, alpha=0.5):
-    # Convert current net to Flower Parameters
+    STATE_DIR = f"/tmp/flwr_client_state/{cid}"
+    os.makedirs(STATE_DIR, exist_ok=True)
+    state_path = f"{STATE_DIR}/state.pt"
+
     current_params = ndarrays_to_parameters([p.detach().cpu().numpy() for p in net.parameters()])
 
-    state_path = f"{STATE_DIR}/{cid}.pt"
-
     if os.path.exists(state_path):
-        # allowlist numpy.ndarray for unpickling
-        with torch.serialization.safe_globals([Parameters, np.ndarray]):
-            loaded_state = torch.load(state_path, weights_only=False)
+        try:
+            with torch.serialization.safe_globals([Parameters, np.ndarray]):
+                loaded_state = torch.load(state_path, weights_only=False)
+        except (EOFError, pickle.UnpicklingError):
+            print(f"[WARN] Corrupted state for cid={cid}, resetting.")
+            loaded_state = None
+            os.remove(state_path)
+    else:
+        loaded_state = None
 
-        # loaded_state["parameters"] is list of ndarrays, convert to Flower Parameters
+    if loaded_state:
         state = {
-            "parameters": [ndarrays_to_parameters(p) for p in loaded_state["parameters"]],
+            "parameters": [ndarrays_to_parameters(p) for p in loaded_state["parameters"]] + [current_params],
             "direction": loaded_state["direction"],
             "direction_accumulation": loaded_state["direction_accumulation"],
         }
-        state["parameters"].append(current_params)
     else:
-        # Initialize state
         state = {
             "parameters": [current_params],
             "direction": torch.randn_like(flatten_parameters(current_params)),
             "direction_accumulation": 0.1,
         }
 
-    # Compute mean and sigma
     mu, sigma = mean_and_sigma_flat(state["parameters"])
-
-    # Sample epsilon ~ N(0, sigma)
     epsilon = torch.randn_like(sigma) * sigma
-
     current_flat = flatten_parameters(current_params)
     g_flat = (
         (1 - alpha) * current_flat
@@ -305,15 +304,16 @@ def statistical_mimicry_fn(net: torch.nn.Module, cid, alpha=0.5):
     state["direction_accumulation"] *= 1.2 if state["direction_accumulation"] < 2 else state["direction_accumulation"]
     state["direction"] = state["direction"] / (torch.norm(state["direction"]) + 1e-12)
 
-    # Save state (ndarrays are safe)
+    tmp_path = state_path + ".tmp"
     torch.save(
         {
             "parameters": [parameters_to_ndarrays(p) for p in state["parameters"]],
             "direction": state["direction"],
             "direction_accumulation": state["direction_accumulation"],
         },
-        state_path,
+        tmp_path,
     )
+    os.replace(tmp_path, state_path)
 
     g_parameters = unflatten_parameters(g_flat, current_params)
     return g_parameters
@@ -353,7 +353,7 @@ def train(net, trainloader, epochs, device, flip_labels=False, random_update=Fal
     elif update_scaling:
         update_scaling_fn(net, factor=factor)
     elif statistical_mimicry:
-        statistical_mimicry_fn(net, round, cid)
+        statistical_mimicry_fn(net, cid)
     return avg_trainloss, accuracy
 
 
