@@ -2,18 +2,6 @@
 \[...\]
 # Experiments
 Requirements:
-| Dependency             | Version        |
-|------------------------|----------------|
-| flwr                   | ==1.20.0       |
-| flwr[simulation]       | ==1.20.0       |
-| flwr-datasets[vision]  | >=0.5.0        |
-| pandas                 | ==2.3.1        |
-| scipy                  | ~=1.16.1       |
-| torch                  | ==2.8.0        |
-| torchvision            | ==0.23.0       |
-| numpy                  | ~=2.3.2        |
-| scikit-learn           | ~=1.7.1        |
-
 > requirements.txt together with pyproject.toml includes all of these and are downloaded in the serverapp docker image
 
 ## SLURM managed Cluster
