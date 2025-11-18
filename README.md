@@ -1,4 +1,4 @@
-# ByeBye-BadClients
+# FLARE: An Adaptive Reputation for Dynamic Client Reliability Assessment in Federated Learning
 \[...\]
 # Experiments
 Requirements:
