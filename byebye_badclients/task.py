@@ -1,5 +1,6 @@
 """ByeBye-BadClients: A Flower / PyTorch app."""
 import os
+import pickle
 from collections import OrderedDict
 
 import numpy as np
@@ -7,8 +8,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters, Parameters
 from torch.utils.data import DataLoader, Subset, random_split
-from torchvision.transforms import Compose, Normalize, ToTensor
+from torchvision import datasets, transforms
 
 class Net(nn.Module):
     def __init__(self):
@@ -45,64 +47,6 @@ class NetMNIST(nn.Module):
         x = self.pool(F.relu(self.conv1(x)))
         x = x.view(-1, 6 * 13 * 13)
         return self.fc1(x)
-
-
-def create_dirichlet_partition(labels: np.ndarray, num_partitions: int, alpha: float = 0.5) -> dict:
-    """Create Dirichlet non-IID partitions based on labels."""
-    # Set seed for reproducible partitioning
-    np.random.seed(num_partitions)
-
-    num_classes = len(np.unique(labels))
-    label_distribution = np.random.dirichlet([alpha] * num_classes, num_partitions)
-
-    # Get indices for each class
-    class_indices = {}
-    for class_id in range(num_classes):
-        class_indices[class_id] = np.where(labels == class_id)[0]
-
-    partitions = {i: [] for i in range(num_partitions)}
-
-    for class_id in range(num_classes):
-        class_idx = class_indices[class_id].copy()
-        np.random.shuffle(class_idx)
-
-        # Split class indices according to Dirichlet distribution
-        splits = np.cumsum(label_distribution[:, class_id] * len(class_idx)).astype(int)
-        splits = np.concatenate([[0], splits])
-
-        for partition_id in range(num_partitions):
-            start_idx = splits[partition_id]
-            end_idx = splits[partition_id + 1]
-            partitions[partition_id].extend(class_idx[start_idx:end_idx].tolist())
-
-    for partition_id in range(num_partitions):
-        np.random.seed(partition_id)
-        np.random.shuffle(partitions[partition_id])
-
-    return partitions
-
-
-def create_iid_partition(dataset_size: int, num_partitions: int) -> dict:
-    """Create IID partitions."""
-    # Set seed for reproducible partitioning
-    np.random.seed(num_partitions)
-
-    indices = list(range(dataset_size))
-    np.random.shuffle(indices)
-
-    partition_size = dataset_size // num_partitions
-    partitions = {}
-
-    for i in range(num_partitions):
-        start_idx = i * partition_size
-        if i == num_partitions - 1:  # Last partition gets remaining samples
-            end_idx = dataset_size
-        else:
-            end_idx = (i + 1) * partition_size
-        partitions[i] = indices[start_idx:end_idx]
-
-    return partitions
-
 
 class PartitionDataset:
     """Mock FederatedDataset partition to maintain similar API."""
@@ -174,111 +118,106 @@ class MockFederatedDataset:
         partition_indices = self.partitions[partition_id]
         return PartitionDataset(self.torchvision_dataset, partition_indices)
 
-partitioned_datasets = {}
+def create_iid_partition(num_samples: int, num_partitions: int):
+    """Simple IID split: uniform random chunks."""
+    indices = np.random.permutation(num_samples)
+    return {i: indices[i::num_partitions].tolist() for i in range(num_partitions)}
+
+def create_dirichlet_partition(labels: np.ndarray, num_partitions: int, alpha: float = 0.5):
+    """Dirichlet non-IID partitions. Proper version."""
+    np.random.seed(0)
+    partitions = {i: [] for i in range(num_partitions)}
+    num_classes = len(np.unique(labels))
+
+    for class_id in range(num_classes):
+        class_indices = np.where(labels == class_id)[0]
+        np.random.shuffle(class_indices)
+        proportions = np.random.dirichlet([alpha] * num_partitions)
+        split_points = (np.cumsum(proportions) * len(class_indices)).astype(int)
+        start = 0
+        for i, end in enumerate(split_points):
+            partitions[i].extend(class_indices[start:end])
+            start = end
+
+    for p in partitions.values():
+        np.random.shuffle(p)
+
+    return partitions
+
+# Cache to avoid refetching only
+_global_dataset_cache = {}
+
+
 def load_data(
     partition_id: int,
     num_partitions: int,
     dataset: str,
-    total_max_samples: int,
+    total_max_samples: int = -1,
     non_iid: bool = False,
     dirichlet_alpha: float = 0.5,
 ):
-    """Load partition data using torchvision datasets (no HuggingFace)."""
-
+    """Return:
+       -> trainloader for this client
+       -> global testloader (shared across all clients)
+    """
     dataset_name = dataset.split("/")[-1]
-
-    # Pick cache dir
-    cache_dir = os.environ.get("TORCHVISION_DATA_DIR", f"./data/")
+    cache_dir = os.environ.get("TORCHVISION_DATA_DIR", "./data/")
     os.makedirs(cache_dir, exist_ok=True)
 
-    # Partition cache key
-    partition_key = f"{dataset_name}_{num_partitions}_{non_iid}_{dirichlet_alpha}"
+    cache_key = f"{dataset_name}"
 
-    if partition_key not in partitioned_datasets:
-        print(f"Initializing partitioned dataset for {dataset_name}...")
-
-        # Choose transforms
+    # Load & cache dataset once
+    if cache_key not in _global_dataset_cache:
         if dataset_name == "mnist":
-            transform = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
-            torchvision_dataset = torchvision.datasets.MNIST(
-                root=cache_dir, train=True, download=True, transform=transform
-            )
+            transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+            full_train = datasets.MNIST(cache_dir, train=True, download=True, transform=transform)
+            test_set = datasets.MNIST(cache_dir, train=False, download=True, transform=transform)
         elif dataset_name == "cifar10":
-            transform = Compose(
-                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-            )
-            torchvision_dataset = torchvision.datasets.CIFAR10(
-                root=cache_dir, train=True, download=True, transform=transform
-            )
-        elif dataset_name == "cifar100":
-            transform = Compose(
-                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-            )
-            torchvision_dataset = torchvision.datasets.CIFAR100(
-                root=cache_dir, train=True, download=True, transform=transform
-            )
+            transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5, 0.5, 0.5))])
+            full_train = datasets.CIFAR10(cache_dir, train=True, download=True, transform=transform)
+            test_set = datasets.CIFAR10(cache_dir, train=False, download=True, transform=transform)
         elif dataset_name == "svhn":
-            transform = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
-            torchvision_dataset = torchvision.datasets.SVHN(
-                root=cache_dir, split="train", download=True, transform=transform
+            transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=(0.5,), std=(0.5,))])
+            full_train = datasets.SVHN(cache_dir, split="train", download=True, transform=transform)
+            test_set = datasets.SVHN(cache_dir, split="test", download=True, transform=transform)
+        elif dataset_name == "cifar100":
+            transform = transforms.Compose(
+                [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
             )
+            full_train = torchvision.datasets.CIFAR100(cache_dir, train=True, download=True, transform=transform)
+            test_set = torchvision.datasets.CIFAR100(cache_dir, train=False, download=True, transform=transform)
         else:
-            print(f"Warning: Unknown dataset {dataset_name}, defaulting to CIFAR10")
-            transform = Compose(
-                [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-            )
-            torchvision_dataset = torchvision.datasets.CIFAR10(
-                root=cache_dir, train=True, download=True, transform=transform
-            )
+            raise ValueError(f"Unknown dataset: {dataset_name}")
 
-        # Extract labels
-        if hasattr(torchvision_dataset, "targets"):
-            labels = np.array(torchvision_dataset.targets)
-        elif hasattr(torchvision_dataset, "labels"):
-            labels = np.array(torchvision_dataset.labels)
-        else:
-            labels = np.array([lbl for _, lbl in torchvision_dataset])
+        _global_dataset_cache[cache_key] = (full_train, test_set)
 
-        # Partition indices
-        if non_iid:
-            partitions = create_dirichlet_partition(
-                labels, num_partitions, dirichlet_alpha
-            )
-        else:
-            partitions = create_iid_partition(
-                len(torchvision_dataset), num_partitions
-            )
+    full_train, test_set = _global_dataset_cache[cache_key]
 
-        partitioned_datasets[partition_key] = (torchvision_dataset, partitions)
+    # Partition only the training dataset
+    if hasattr(full_train, "targets"):
+        labels = np.array(full_train.targets)
+    else:
+        labels = np.array([lbl for _, lbl in full_train])
 
-    torchvision_dataset, partitions = partitioned_datasets[partition_key]
+    if non_iid:
+        partitions = create_dirichlet_partition(labels, num_partitions, dirichlet_alpha)
+    else:
+        partitions = create_iid_partition(len(full_train), num_partitions)
 
-    # Pick this client’s partition
-    indices = partitions[partition_id]
-    partition = Subset(torchvision_dataset, indices)
+    # Pick indices for THIS client
+    client_indices = partitions[partition_id]
 
-    # Train/test split (80/20)
-    n_total = len(partition)
-    n_test = n_total // 5
-    test_indices = indices[:n_test]
-    train_indices = indices[n_test:]
+    # Optional cap
+    if total_max_samples > 0:
+        client_indices = client_indices[:total_max_samples]
 
-    train_set = Subset(torchvision_dataset, train_indices)
-    test_set = Subset(torchvision_dataset, test_indices)
-
-    # Cap max samples if requested
-    if total_max_samples != -1:
-        max_train = min(total_max_samples, len(train_set))
-        max_test = min(total_max_samples, len(test_set))
-        train_set = Subset(train_set, list(range(max_train)))
-        test_set = Subset(test_set, list(range(max_test)))
+    train_subset = Subset(full_train, client_indices)
 
     # DataLoaders
-    trainloader = DataLoader(train_set, batch_size=32, shuffle=True)
-    testloader = DataLoader(test_set, batch_size=32)
+    trainloader = DataLoader(train_subset, batch_size=32, shuffle=True, drop_last=True)
+    testloader = DataLoader(test_set, batch_size=64, shuffle=False, drop_last=True)
 
     return trainloader, testloader
-
 
 def flip_labels_fn(labels, num_classes=10):
     return (labels + 1) % num_classes
@@ -294,7 +233,93 @@ def update_scaling_fn(net: nn.modules.Module, factor: float):
     for param in params:
         param.data *= factor
 
-def train(net, trainloader, epochs, device, flip_labels=False, random_update=False, update_scaling=False, factor=2, num_classes=10):
+def mean_and_sigma_flat(parameters_list):
+    flat_tensors = []
+    for p in parameters_list:
+        ndarrays = parameters_to_ndarrays(p)
+        # Flatten all arrays and concatenate
+        flat = torch.cat([torch.from_numpy(arr).float().view(-1) for arr in ndarrays])
+        flat_tensors.append(flat)
+
+    stacked = torch.stack(flat_tensors)
+    mean_flat = torch.mean(stacked, dim=0)
+    sigma_flat = torch.std(stacked, dim=0, unbiased=False)
+    return mean_flat, sigma_flat
+
+def flatten_parameters(parameters):
+    ndarrays = parameters_to_ndarrays(parameters)
+    return torch.cat([torch.from_numpy(x).float().view(-1) for x in ndarrays])
+
+def unflatten_parameters(flat_tensor, template_parameters):
+    ndarrays = parameters_to_ndarrays(template_parameters)
+    new_nd = []
+    idx = 0
+    for arr in ndarrays:
+        numel = arr.size
+        new_arr = flat_tensor[idx:idx + numel].reshape(arr.shape).numpy()
+        new_nd.append(new_arr)
+        idx += numel
+    return ndarrays_to_parameters(new_nd)
+
+def statistical_mimicry_fn(net: torch.nn.Module, cid, alpha=0.5):
+    STATE_DIR = f"/tmp/flwr_client_state/{cid}"
+    os.makedirs(STATE_DIR, exist_ok=True)
+    state_path = f"{STATE_DIR}/state.pt"
+
+    current_params = ndarrays_to_parameters([p.detach().cpu().numpy() for p in net.parameters()])
+
+    if os.path.exists(state_path):
+        try:
+            with torch.serialization.safe_globals([Parameters, np.ndarray]):
+                loaded_state = torch.load(state_path, weights_only=False)
+        except (EOFError, pickle.UnpicklingError):
+            print(f"[WARN] Corrupted state for cid={cid}, resetting.")
+            loaded_state = None
+            os.remove(state_path)
+    else:
+        loaded_state = None
+
+    if loaded_state:
+        state = {
+            "parameters": [ndarrays_to_parameters(p) for p in loaded_state["parameters"]] + [current_params],
+            "direction": loaded_state["direction"],
+            "direction_accumulation": loaded_state["direction_accumulation"],
+        }
+    else:
+        state = {
+            "parameters": [current_params],
+            "direction": torch.randn_like(flatten_parameters(current_params)),
+            "direction_accumulation": 0.1,
+        }
+
+    mu, sigma = mean_and_sigma_flat(state["parameters"])
+    epsilon = torch.randn_like(sigma) * sigma
+    current_flat = flatten_parameters(current_params)
+    g_flat = (
+        (1 - alpha) * current_flat
+        + alpha * (mu + epsilon)
+        + state["direction_accumulation"] * state["direction"]
+    )
+
+    state["direction_accumulation"] *= 1.2 if state["direction_accumulation"] < 2 else state["direction_accumulation"]
+    state["direction"] = state["direction"] / (torch.norm(state["direction"]) + 1e-12)
+
+    tmp_path = state_path + ".tmp"
+    torch.save(
+        {
+            "parameters": [parameters_to_ndarrays(p) for p in state["parameters"]],
+            "direction": state["direction"],
+            "direction_accumulation": state["direction_accumulation"],
+        },
+        tmp_path,
+    )
+    os.replace(tmp_path, state_path)
+
+    g_parameters = unflatten_parameters(g_flat, current_params)
+    return g_parameters
+
+
+def train(net, trainloader, epochs, device, flip_labels=False, random_update=False, update_scaling=False, alie=False, statistical_mimicry=False, factor=2, num_classes=10, cid=None):
     """Train the model on the training set."""
     net.to(device)
     criterion = torch.nn.CrossEntropyLoss().to(device)
@@ -327,7 +352,8 @@ def train(net, trainloader, epochs, device, flip_labels=False, random_update=Fal
         random_update_fn(net)
     elif update_scaling:
         update_scaling_fn(net, factor=factor)
-
+    elif statistical_mimicry:
+        statistical_mimicry_fn(net, cid)
     return avg_trainloss, accuracy
 
 
@@ -380,6 +406,23 @@ def set_weights(net, parameters):
     params_dict = zip(trainable_keys, parameters)
     state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
     net.load_state_dict(state_dict, strict=False)
+
+def parameters_to_tensor(parameters) -> torch.Tensor:
+    """Convert flwr.common.Parameters to a single flattened tensor."""
+    ndarrays = parameters_to_ndarrays(parameters)  # list of numpy arrays
+    flat = torch.tensor([], dtype=torch.float32)
+    for arr in ndarrays:
+        flat = torch.cat([flat, torch.from_numpy(arr).float()])
+    return flat
+
+def parameters_to_tensorlist(parameters):
+    ndarrays = parameters_to_ndarrays(parameters)
+    return [torch.from_numpy(arr).float() for arr in ndarrays]
+
+def parameters_multiply_scalar(parameters, scalar):
+    for p in parameters():
+        p.data = p.data * scalar
+    return parameters
 
 def freeze_model(net):
     for name, param in net.named_parameters():

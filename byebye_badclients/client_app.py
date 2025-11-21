@@ -62,7 +62,9 @@ class FlowerClient(NumPyClient):
 
         attack_patterns = {"flip_labels": False,
                            "random_update": False,
-                           "update_scaling": False}
+                           "update_scaling": False,
+                           "alie": False,
+                           "statistical_mimicry": False,}
         if self.role == Role.MALICIOUS:
             if self.attack_pattern == 'label-flipping':
                 attack_patterns["flip_labels"] = True
@@ -72,6 +74,12 @@ class FlowerClient(NumPyClient):
 
             elif self.attack_pattern == 'update-scaling':
                 attack_patterns["update_scaling"] = True
+
+            elif self.attack_pattern == 'alie':
+                attack_patterns["alie"] = True
+
+            elif self.attack_pattern == 'statistical_mimicry':
+                attack_patterns["statistical_mimicry"] = True
 
             else:
                 rng = random.Random(time.time())
@@ -89,8 +97,11 @@ class FlowerClient(NumPyClient):
             flip_labels=attack_patterns["flip_labels"],
             random_update=attack_patterns["random_update"],
             update_scaling=attack_patterns["update_scaling"],
+            alie=attack_patterns["alie"],
+            statistical_mimicry=attack_patterns["statistical_mimicry"],
             factor=self.update_scaling_factor,
-            num_classes=num_classes
+            num_classes=num_classes,
+            cid=self.cid
         )
         train_end = time.time()
 
@@ -150,11 +161,10 @@ def client_fn(context: Context):
     malicious_probability = context.run_config["malicious-probability"]
     attack_patterns = context.run_config["attack-patterns"]
     attack_patterns = set(attack_patterns.split(","))
-    possible_attack_patterns = {"update-scaling", "label-flipping", "random-update", "adaptive-attack"}
-    if len(possible_attack_patterns - attack_patterns) == 4:
+    possible_attack_patterns = {"update-scaling", "label-flipping", "random-update", "adaptive-attack", "alie", "statistical-mimicry"}
+    if len(possible_attack_patterns - attack_patterns) == 6:
         attack_patterns = []
     update_scaling_factor = context.run_config["update-scaling-factor"]
-
     # Load model and data
     dataset = hf_dataset.split('/')[-1]
     net = load_model(dataset)

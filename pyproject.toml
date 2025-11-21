@@ -16,12 +16,12 @@ license = "Apache-2.0"
 dependencies = [
     "flwr[simulation]==1.20.0",
     "flwr-datasets[vision]>=0.5.0",
-    "torch==2.8.0",
-    "torchvision==0.23.0",
-    "pandas==2.3.1",
-    "scipy~=1.16.1",
-    "numpy~=2.3.2",
-    "scikit-learn~=1.7.1"
+    "torch==2.8.0a0+5228986c39.nv25.6",
+    "torchvision==0.22.0a0+95f10a4e",
+    "pandas",
+    "scipy",
+    "numpy",
+    "scikit-learn"
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -38,17 +38,17 @@ clientapp = "byebye_badclients.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-no-defense-fedavg = true
-num-server-rounds = 25
+no-defense-fedavg = false
+num-server-rounds = 1
 fraction-fit = 0.2
 fraction-evaluate = 0.8
 local-epochs = 5
-dataset = 'ylecun/mnist' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10', 'uoft-cs/cifar100']
-total-max-samples = 100
-non-iid = false
+dataset = 'ufldl-stanford/svhn' # any of ['ylecun/mnist', 'ufldl-stanford/svhn', 'uoft-cs/cifar10', 'uoft-cs/cifar100']
+total-max-samples = 2000
+non-iid = true
 dirichlet-alpha = 0.5 # if non-iid == true
-malicious-probability = 0.3
-attack-patterns = 'label-flipping' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack'] and separate by comma
+malicious-probability = 0.4
+attack-patterns = 'statistical-mimicry' # any of ['label-flipping', 'random-update', 'update-scaling', 'adaptive-attack', 'alie', 'statistical-mimicry'] and separate by comma
 update-scaling-factor = 2
 base-reliability-threshold = 0.5
 alpha = 0.7
@@ -65,7 +65,7 @@ late-training-threshold = 0.6
 [tool.flwr.federations]
 default = "local-simulation"
 
-# Local simulation federation with 10 virtual SuperNodes
+# Local simulation federation with 100 virtual SuperNodes
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 100
 
